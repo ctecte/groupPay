@@ -269,6 +269,71 @@ def api_qr(session_id, name):
     return response
 
 
+@app.route("/api/sessions/<session_id>/pay/<name>", methods=["GET"])
+def api_pay_page(session_id, name):
+    """Render a payment page with QR code, payee details, and download button."""
+    session = db.get_session(session_id)
+    if not session:
+        return "Session not found", 404
+    participant = next((p for p in session["participants"] if p["name"] == name), None)
+    if not participant:
+        return "Participant not found", 404
+
+    payee_phone = session.get("payee_phone", "")
+    phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
+    qr_img_url = f"/api/sessions/{session_id}/qr/{quote(name)}"
+    from datetime import datetime
+    date_str = datetime.utcnow().strftime("%Y%m%d")
+    event_clean = session["event_name"].replace(" ", "_")[:20]
+    filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PayNow — {name}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: linear-gradient(135deg, #0f172a, #1e3a5f, #0f172a); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; color: white; }}
+  .card {{ background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); border-radius: 24px; padding: 32px; max-width: 380px; width: 100%; text-align: center; }}
+  .title {{ font-size: 14px; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }}
+  .amount {{ font-size: 48px; font-weight: 700; background: linear-gradient(135deg, #4ade80, #22d3ee); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 24px; }}
+  .qr-wrap {{ background: white; border-radius: 16px; padding: 20px; margin-bottom: 24px; }}
+  .qr-wrap img {{ width: 100%; max-width: 280px; height: auto; }}
+  .details {{ background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; margin-bottom: 24px; text-align: left; }}
+  .row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }}
+  .row:last-child {{ border: none; }}
+  .label {{ color: rgba(255,255,255,0.5); font-size: 14px; }}
+  .value {{ color: white; font-weight: 600; font-size: 14px; font-family: 'SF Mono', monospace; }}
+  .btn {{ display: block; width: 100%; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: 600; text-decoration: none; text-align: center; transition: all 0.2s; cursor: pointer; border: none; }}
+  .btn-primary {{ background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; margin-bottom: 12px; }}
+  .btn-primary:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(59,130,246,0.4); }}
+  .btn-secondary {{ background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); }}
+  .btn-secondary:hover {{ background: rgba(255,255,255,0.15); }}
+  .event {{ color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 16px; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title">PayNow Payment</div>
+  <div class="amount">${participant['amount']}</div>
+  <div class="qr-wrap">
+    <img src="{qr_img_url}" alt="PayNow QR Code">
+  </div>
+  <div class="details">
+    <div class="row"><span class="label">Pay to</span><span class="value">{session['payee']}</span></div>
+    <div class="row"><span class="label">PayNow</span><span class="value">{phone_display}</span></div>
+    <div class="row"><span class="label">Amount</span><span class="value">${participant['amount']}</span></div>
+    <div class="row"><span class="label">Event</span><span class="value">{session['event_name']}</span></div>
+  </div>
+  <a href="{qr_img_url}" download="{filename}" class="btn btn-primary">📥 Download QR Image</a>
+  <div class="event">GroupPay — {session['event_name']}</div>
+</div>
+</body>
+</html>"""
+
+
 # ---------------------------------------------------------------------------
 # Telegram Bot Handlers
 # ---------------------------------------------------------------------------
@@ -340,9 +405,39 @@ def handle_qr_whisper(call):
         )
         return
 
-    # Open the QR image URL in their browser — only they see it
-    qr_url = f"{WEBAPP_URL}/api/sessions/{session_id}/qr/{quote(target_name)}"
-    bot.answer_callback_query(call.id, url=qr_url)
+    session = db.get_session(session_id)
+    if not session:
+        bot.answer_callback_query(call.id, "Session expired.", show_alert=True)
+        return
+
+    participant = next((p for p in session["participants"] if p["name"] == target_name), None)
+    if not participant:
+        bot.answer_callback_query(call.id, "Participant not found.", show_alert=True)
+        return
+
+    payee_phone = session.get("payee_phone", "")
+    phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
+
+    bot.answer_callback_query(call.id, "🔓 QR code unlocked!")
+
+    # Replace button with payment details + QR page link
+    qr_page_url = f"{WEBAPP_URL}/api/sessions/{session_id}/pay/{quote(target_name)}"
+    p_mention = _mention(target_name, target_tid)
+    try:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📲 Open PayNow QR", url=qr_page_url))
+        bot.edit_message_text(
+            f"💸 {p_mention} owes <b>${participant['amount']}</b>\n"
+            f"💰 Pay to: <b>{session['payee']}</b>\n"
+            f"📲 PayNow: <b>{phone_display}</b>\n\n"
+            f"👇 Tap below to view your QR code",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    except Exception:
+        pass
 
 
 @bot.message_handler(commands=["start"])
