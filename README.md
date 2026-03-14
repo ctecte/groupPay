@@ -40,77 +40,91 @@ Telegram Mini App for splitting bills with friends. Generates real PayNow QR cod
 
 ## Prerequisites
 
-- Python 3.11+
-- Node.js 18+ (for building frontend)
-- A Telegram Bot token (from [@BotFather](https://t.me/BotFather))
-- ngrok or Cloudflare Tunnel (for HTTPS tunnel)
+- **Python 3.11+** — check with `python --version`
+- **Node.js 18+** — check with `node --version` (for building frontend)
+- **npm** — comes with Node.js
+- **ngrok account** (free) — sign up at [ngrok.com](https://ngrok.com), then authenticate:
+  ```bash
+  ngrok config add-authtoken YOUR_AUTH_TOKEN
+  ```
+  Alternatively, use **Cloudflare Tunnel** (`cloudflared`) — no account needed for quick tunnels.
+- **Telegram Bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram:
+  1. Message `/newbot`
+  2. Choose a name and username
+  3. Copy the token (looks like `123456789:ABCdefGHIjklMNO...`)
 
-## Setup
+## Setup (from scratch)
 
-### 1. Clone and install
+### 1. Clone the repo
 
 ```bash
 git clone https://github.com/ctecte/groupPay.git
 cd groupPay
-
-# Python dependencies
-python -m venv venv
-source venv/bin/activate
-pip install pyTeleBot flask flask-cors "qrcode[pil]"
-
-# Frontend dependencies
-cd splitwize-spark
-npm install
 ```
 
-### 2. Build the frontend
+### 2. Install Python dependencies
+
+```bash
+python -m venv venv
+source venv/bin/activate   # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 3. Install frontend dependencies and build
 
 ```bash
 cd splitwize-spark
+npm install
 npx vite build
 cd ..
 ```
 
 The built files go to `splitwize-spark/dist/` — Flask serves them automatically.
 
-### 3. Set environment variables
+### 4. Set environment variables
 
 ```bash
 export BOT_TOKEN="your-telegram-bot-token"
-export WEBAPP_URL="https://your-domain.ngrok-free.dev"  # Your public HTTPS URL
+export WEBAPP_URL="https://your-domain.ngrok-free.dev"
 ```
 
-Or edit the defaults in `bot.py` directly.
+Or edit the defaults directly in `bot.py` (lines 22-23).
 
-### 4. Start an HTTPS tunnel
+### 5. Start an HTTPS tunnel
 
-The Telegram Mini App requires HTTPS. Use **ngrok** or **Cloudflare Tunnel**:
+Telegram Mini Apps require HTTPS. Pick one:
 
-#### Option A: ngrok
+#### Option A: ngrok (recommended)
 
 ```bash
-# Free tier (random URL each time)
+# First time: authenticate (one-time setup)
+ngrok config add-authtoken YOUR_NGROK_AUTH_TOKEN
+
+# Free tier (random URL — changes each restart)
 ngrok http 5000
 
-# With a stable domain (requires ngrok account)
+# With a stable domain (free with ngrok account)
 ngrok http 5000 --domain=your-subdomain.ngrok-free.dev
 ```
+
+> **Important**: If using a random URL, you must update `WEBAPP_URL` every time ngrok restarts. A stable domain avoids this.
 
 #### Option B: Cloudflare Tunnel
 
 ```bash
+# Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 cloudflared tunnel --url http://localhost:5000
 ```
 
-Copy the HTTPS URL and set it as `WEBAPP_URL`.
+Copy the generated HTTPS URL and set it as `WEBAPP_URL`.
 
-### 5. Configure the bot with BotFather
+### 6. Configure the bot with BotFather
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram
 2. `/mybots` → select your bot → **Bot Settings** → **Menu Button** → set the URL to your `WEBAPP_URL`
-3. Enable **Inline Mode** if you want inline features: `/mybots` → **Bot Settings** → **Inline Mode** → Enable
+3. Add the bot to a Telegram group chat
 
-### 6. Run the bot
+### 7. Run the bot
 
 ```bash
 source venv/bin/activate
@@ -121,6 +135,28 @@ This starts:
 - Telegram bot (long polling)
 - Flask API on `http://0.0.0.0:5000`
 - Static file server for the React build
+
+### Quick start (all-in-one)
+
+After initial setup, use the included script:
+
+```bash
+./start.sh
+```
+
+This kills any existing processes, rebuilds the frontend, and starts ngrok + bot.
+
+### Auto-created files
+
+These files are created automatically on first run (gitignored):
+
+| File | Description |
+|------|-------------|
+| `grouppay.db` | SQLite database — sessions and participants |
+| `group_members.json` | Cached Telegram group members (name + user ID) |
+| `uploads/` | Uploaded payment screenshots |
+| `bot.log` | Bot stdout/stderr |
+| `ngrok.log` | ngrok stdout |
 
 ## API Endpoints
 
@@ -197,7 +233,7 @@ rm grouppay.db
 
 ## Tech Stack
 
-- **Bot**: Python, [pyTeleBot](https://github.com/eternnoir/pyTeleBot)
+- **Bot**: Python, [pyTelegramBotAPI](https://github.com/eternnoir/pyTeleBot)
 - **API**: Flask, flask-cors
 - **Database**: SQLite
 - **QR**: qrcode + Pillow, EMVCo PayNow format
