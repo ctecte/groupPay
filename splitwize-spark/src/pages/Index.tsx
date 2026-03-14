@@ -21,7 +21,14 @@ export default function GroupPayPrototype() {
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [remindersSent, setRemindersSent] = useState<Record<string, string>>({});
   const [sendingReminder, setSendingReminder] = useState<string | null>(null);
-  const [payeePhone, setPayeePhone] = useState('');
+  const [payeePhone, setPayeePhone] = useState(() => {
+    // Auto-fill from localStorage if user has paid before
+    try {
+      const cached = localStorage.getItem('grouppay_phone');
+      if (cached && cached.length === 8 && /^[89]/.test(cached)) return cached;
+    } catch {}
+    return '';
+  });
 
   // Tabbed views
   const [reviewTab, setReviewTab] = useState<'overview' | 'details'>('overview');
@@ -760,7 +767,7 @@ export default function GroupPayPrototype() {
                 className="w-full bg-transparent text-white mono text-sm outline-none placeholder-white/30"
               />
             </div>
-            <div className={`bg-white/5 rounded-xl px-4 py-3 border mb-4 ${payeePhone.length === 8 && /^[89]/.test(payeePhone) ? 'border-green-400/30' : payeePhone.length > 0 ? 'border-red-400/30' : 'border-white/10'}`}>
+            <div className={`bg-white/5 rounded-xl px-4 py-3 border-2 mb-4 transition-all ${payeePhone.length === 8 && /^[89]/.test(payeePhone) ? 'border-green-400/50' : 'border-red-400/40'}`}>
               <div className="text-white/50 text-xs mb-1">PayNow phone number (for QR code)</div>
               <div className="flex items-center gap-2">
                 <span className="text-white/50 mono text-sm">+65</span>
@@ -778,6 +785,9 @@ export default function GroupPayPrototype() {
                   maxLength={8}
                 />
               </div>
+              {payeePhone.length === 0 && (
+                <div className="text-red-400/70 text-[10px] mt-1">Required — participants will pay to this number</div>
+              )}
               {payeePhone.length > 0 && payeePhone.length < 8 && (
                 <div className="text-red-400 text-[10px] mt-1">Enter 8 digits</div>
               )}
@@ -797,7 +807,7 @@ export default function GroupPayPrototype() {
               </div>
             </div>
             <button
-              onClick={() => setStep('participants')}
+              onClick={() => { try { localStorage.setItem('grouppay_phone', payeePhone); } catch {} setStep('participants'); }}
               disabled={!currentUser || currentUser === 'you' || payeePhone.length !== 8 || !/^[89]/.test(payeePhone)}
               className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
             >
