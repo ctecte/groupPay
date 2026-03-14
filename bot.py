@@ -60,9 +60,10 @@ def _mention(name: str, telegram_id: str | None = None, chat_id: int | None = No
             if uname == name:
                 tid = str(uid)
                 break
-    if tid:
+    if tid and tid != "0":
         return f'<a href="tg://user?id={tid}">{name}</a>'
-    return f"<b>{name}</b>"
+    # No ID — treat as a username handle
+    return f"@{name}"
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +394,8 @@ def handle_qr_whisper(call):
     # Check if clicker is the intended recipient
     is_target = (
         str(clicker.id) == target_tid
-        or (clicker.first_name or "") == target_name
-        or (clicker.username or "") == target_name
+        or (clicker.first_name or "").lower() == target_name.lower()
+        or (clicker.username or "").lower() == target_name.lower()
     )
 
     if not is_target:

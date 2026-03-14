@@ -235,7 +235,7 @@ export default function GroupPayPrototype() {
 
   const updateParticipant = (index: number, value: string) => {
     const newParticipants = [...participants];
-    newParticipants[index] = value;
+    newParticipants[index] = value.replace(/^@+/, '');
     setParticipants(newParticipants);
   };
 
