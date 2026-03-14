@@ -1,0 +1,205 @@
+# GroupPay
+
+Telegram Mini App for splitting bills with friends. Generates real PayNow QR codes with pre-filled amounts, sends whisper-style private QR delivery in group chats, and tracks payment status.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Telegram Group Chat                        │
+│  ├─ /split command → opens Mini App         │
+│  ├─ Bot announces split + amounts           │
+│  └─ Whisper QR buttons (private per user)   │
+└──────────────┬──────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────┐
+│  bot.py (Python)                            │
+│  ├─ Telegram Bot (pyTeleBot, long polling)  │
+│  ├─ Flask API server (port 5000)            │
+│  ├─ Static file server (serves React build) │
+│  └─ PayNow QR generation (EMVCo format)     │
+└──────────────┬──────────────────────────────┘
+               │
+┌──────────────▼──────────────┐  ┌────────────┐
+│  db.py (SQLite)             │  │  React App  │
+│  ├─ sessions table          │  │  (Vite)     │
+│  └─ participants table      │  └────────────┘
+└─────────────────────────────┘
+```
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `bot.py` | Main entry point — Telegram bot + Flask API + static server |
+| `db.py` | SQLite helper — session/participant CRUD |
+| `paynow_qr.py` | PayNow QR code generator (EMVCo TLV format with CRC-16) |
+| `group_members.json` | Persisted group member tracking (auto-created) |
+| `grouppay.db` | SQLite database (auto-created) |
+| `splitwize-spark/` | React frontend (Telegram Mini App) |
+
+## Prerequisites
+
+- Python 3.11+
+- Node.js 18+ (for building frontend)
+- A Telegram Bot token (from [@BotFather](https://t.me/BotFather))
+- ngrok or Cloudflare Tunnel (for HTTPS tunnel)
+
+## Setup
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/ctecte/groupPay.git
+cd groupPay
+
+# Python dependencies
+python -m venv venv
+source venv/bin/activate
+pip install pyTeleBot flask flask-cors "qrcode[pil]"
+
+# Frontend dependencies
+cd splitwize-spark
+npm install
+```
+
+### 2. Build the frontend
+
+```bash
+cd splitwize-spark
+npx vite build
+cd ..
+```
+
+The built files go to `splitwize-spark/dist/` — Flask serves them automatically.
+
+### 3. Set environment variables
+
+```bash
+export BOT_TOKEN="your-telegram-bot-token"
+export WEBAPP_URL="https://your-domain.ngrok-free.dev"  # Your public HTTPS URL
+```
+
+Or edit the defaults in `bot.py` directly.
+
+### 4. Start an HTTPS tunnel
+
+The Telegram Mini App requires HTTPS. Use **ngrok** or **Cloudflare Tunnel**:
+
+#### Option A: ngrok
+
+```bash
+# Free tier (random URL each time)
+ngrok http 5000
+
+# With a stable domain (requires ngrok account)
+ngrok http 5000 --domain=your-subdomain.ngrok-free.dev
+```
+
+#### Option B: Cloudflare Tunnel
+
+```bash
+cloudflared tunnel --url http://localhost:5000
+```
+
+Copy the HTTPS URL and set it as `WEBAPP_URL`.
+
+### 5. Configure the bot with BotFather
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. `/mybots` → select your bot → **Bot Settings** → **Menu Button** → set the URL to your `WEBAPP_URL`
+3. Enable **Inline Mode** if you want inline features: `/mybots` → **Bot Settings** → **Inline Mode** → Enable
+
+### 6. Run the bot
+
+```bash
+source venv/bin/activate
+python bot.py
+```
+
+This starts:
+- Telegram bot (long polling)
+- Flask API on `http://0.0.0.0:5000`
+- Static file server for the React build
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/sessions` | Create a new split session |
+| `GET` | `/api/sessions/<id>` | Get session details + participants |
+| `PATCH` | `/api/sessions/<id>/participants/<name>/status` | Update payment status |
+| `POST` | `/api/sessions/<id>/participants/<name>/screenshot` | Upload payment screenshot |
+| `POST` | `/api/sessions/<id>/remind` | Send payment reminders to group |
+| `GET` | `/api/sessions/<id>/qr/<name>` | Download PayNow QR code PNG |
+| `GET` | `/api/sessions/<id>/pay/<name>` | Payment page with QR + details |
+
+## How It Works
+
+### Bill Splitting Flow
+
+1. Someone types `/split` in a Telegram group
+2. Bot sends a button that opens the Mini App
+3. User enters: bill amount, GST/service charge, who paid, participants, split method
+4. User confirms → app calls `POST /api/sessions`
+5. Bot announces the split in the group with amounts per person
+6. Each participant gets a **whisper button** — only they can reveal their PayNow QR
+
+### Whisper QR Delivery
+
+- Bot sends one message per participant with a "🔒 Show my QR code" button
+- When clicked, bot checks the clicker's Telegram ID / username against the target
+- ✅ Match → message updates with payee details + "Open PayNow QR" link
+- ❌ No match → "🚫 This QR code is for X only" alert
+
+### PayNow QR Codes
+
+QR codes follow the **EMVCo Merchant-Presented QR Code** spec used by Singapore banks:
+- Pre-filled with payee's phone number and exact amount
+- Scannable by DBS, OCBC, UOB, GrabPay, PayLah, etc.
+- Generated by `paynow_qr.py` with proper CRC-16/CCITT-FALSE checksum
+
+### Member Tracking
+
+- Bot tracks group members who have messaged or joined after it was added
+- Stored in `group_members.json` (persists across restarts)
+- Members appear as checkboxes when adding participants in the Mini App
+- Telegram user IDs are used for proper mentions and whisper identity checks
+
+## Development
+
+### Frontend dev server (with hot reload)
+
+```bash
+cd splitwize-spark
+npx vite --port 8080
+```
+
+Note: The Vite dev server has a proxy config for `/api` → `http://localhost:5000`, so the bot must be running alongside.
+
+### Rebuild frontend after changes
+
+```bash
+cd splitwize-spark
+npx vite build
+```
+
+No bot restart needed — Flask serves from `dist/` directly.
+
+### Database
+
+SQLite, auto-created on first run. To reset:
+
+```bash
+rm grouppay.db
+# Bot recreates it on next start
+```
+
+## Tech Stack
+
+- **Bot**: Python, [pyTeleBot](https://github.com/eternnoir/pyTeleBot)
+- **API**: Flask, flask-cors
+- **Database**: SQLite
+- **QR**: qrcode + Pillow, EMVCo PayNow format
+- **Frontend**: React, TypeScript, Vite, Tailwind CSS
+- **Tunnel**: ngrok / Cloudflare Tunnel
