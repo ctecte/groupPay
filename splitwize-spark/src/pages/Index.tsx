@@ -1,0 +1,1501 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell } from 'lucide-react';
+import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl } from '@/lib/api';
+
+export default function GroupPayPrototype() {
+  const [step, setStep] = useState('start');
+  const [billAmount, setBillAmount] = useState('');
+  const [participants, setParticipants] = useState(['']);
+  const [evenSplit, setEvenSplit] = useState<boolean | null>(null);
+  const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
+  const [splitConfirmed, setSplitConfirmed] = useState(false);
+  const [paymentStatuses, setPaymentStatuses] = useState<Record<string, string>>({});
+  const [selectedPayer, setSelectedPayer] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState('you');
+  const [payeeChoice, setPayeeChoice] = useState<'me' | 'other'>('me');
+  const [eventName, setEventName] = useState('dinner');
+  const [ocrScanning, setOcrScanning] = useState(false);
+  const [ocrItems, setOcrItems] = useState<{ name: string; price: number; qty: number }[]>([]);
+  const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
+  const [screenshotUploaded, setScreenshotUploaded] = useState(false);
+  const [verifyingPayment, setVerifyingPayment] = useState(false);
+  const [remindersSent, setRemindersSent] = useState<Record<string, string>>({});
+  const [sendingReminder, setSendingReminder] = useState<string | null>(null);
+  const [payeePhone, setPayeePhone] = useState('');
+
+  // Tabbed views
+  const [reviewTab, setReviewTab] = useState<'overview' | 'details'>('overview');
+  const [overviewTab, setOverviewTab] = useState<'status' | 'history'>('status');
+
+  // Payment history
+  const [paymentHistory, setPaymentHistory] = useState<{ name: string; amount: string; time: string }[]>([]);
+
+  // GST state
+  const [billType, setBillType] = useState<'total' | 'subtotal'>('total');
+  const [serviceChargeOn, setServiceChargeOn] = useState(false);
+  const [gstOn, setGstOn] = useState(false);
+  const [serviceChargeRate, setServiceChargeRate] = useState(10);
+  const [gstRate, setGstRate] = useState(9);
+  const [showGstBreakdown, setShowGstBreakdown] = useState(true);
+
+  // Split method state
+  const [splitMethod, setSplitMethod] = useState<'amount' | 'percentage' | 'shares'>('amount');
+  const [customPercentages, setCustomPercentages] = useState<Record<string, string>>({});
+  const [customShares, setCustomShares] = useState<Record<string, string>>({});
+
+  // Telegram state
+  const [isTMA, setIsTMA] = useState(false);
+  const [myTelegramId, setMyTelegramId] = useState<string | null>(null);
+
+  // Known group members from bot (parsed from URL ?members=Name1:id1,Name2:id2)
+  const [knownMembers, setKnownMembers] = useState<{ name: string; id: string }[]>([]);
+
+  // Session ID for API
+  const [sessionId, setSessionId] = useState<string | null>(null);
+
+  // File input ref for screenshot upload
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Detect Telegram Mini App environment, parse members & session from URL
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    let tgUserId: string | undefined;
+    let tgName: string | undefined;
+
+    if (tg) {
+      setIsTMA(true);
+      tg.ready();
+      tg.expand();
+
+      const tgUser = tg.initDataUnsafe?.user;
+      if (tgUser) {
+        setCurrentUser(tgUser.first_name);
+        setPayeeChoice('me');
+        tgUserId = tgUser.id?.toString();
+        tgName = tgUser.first_name;
+        if (tgUserId) setMyTelegramId(tgUserId);
+      }
+    }
+
+    const params = new URLSearchParams(window.location.search);
+
+    // Restore session from URL
+    const sessionParam = params.get('session');
+    if (sessionParam) {
+      setSessionId(sessionParam);
+      getSession(sessionParam).then(session => {
+        setEventName(session.event_name);
+        setBillAmount(session.bill_amount);
+        setCurrentUser(session.payee);
+        setEvenSplit(session.even_split);
+        const names = session.participants.map(p => p.name);
+        setParticipants(names);
+        const statuses: Record<string, string> = {};
+        const amounts: Record<string, string> = {};
+        session.participants.forEach(p => {
+          statuses[p.name] = p.status;
+          amounts[p.name] = p.amount;
+        });
+        setPaymentStatuses(statuses);
+        setCustomAmounts(amounts);
+        setSplitConfirmed(true);
+        setStep('overview');
+      }).catch(() => {
+        // Session not found, start fresh
+      });
+    }
+
+    // Parse ?members= from URL
+    const membersParam = params.get('members');
+    if (membersParam) {
+      const parsed = membersParam.split(',').map(entry => {
+        const [name, id] = entry.split(':');
+        return { name: decodeURIComponent(name), id: id || '' };
+      }).filter(m => m.name);
+      setKnownMembers(parsed);
+
+      // If in TMA, find our own entry by Telegram ID and set it
+      // (even if user changes their display name later)
+      if (tgUserId) {
+        const me = parsed.find(m => m.id === tgUserId);
+        if (me) setMyTelegramId(tgUserId);
+      }
+    }
+  }, []);
+
+  // Resolve the payer's Telegram ID from name match or TMA
+  const payerTelegramId = myTelegramId || knownMembers.find(m => m.name === currentUser)?.id || null;
+
+  // Check if a participant is the payer (by Telegram ID or name)
+  const isPayerParticipant = (name: string) => {
+    if (name === currentUser) return true;
+    if (payerTelegramId) {
+      const member = knownMembers.find(m => m.name === name);
+      if (member && member.id === payerTelegramId) return true;
+    }
+    return false;
+  };
+
+  // Participants excluding the payer
+  const otherParticipants = participants.filter(p => p.trim() && !isPayerParticipant(p));
+
+  // GST calculations
+  const subtotalAmount = parseFloat(billAmount) || 0;
+  const serviceChargeAmount = billType === 'subtotal' && serviceChargeOn ? subtotalAmount * (serviceChargeRate / 100) : 0;
+  const baseAfterSC = subtotalAmount + serviceChargeAmount;
+  const gstAmount = billType === 'subtotal' && gstOn ? baseAfterSC * (gstRate / 100) : 0;
+  const finalBillAmount = billType === 'subtotal' ? baseAfterSC + gstAmount : subtotalAmount;
+  const finalBillStr = finalBillAmount.toFixed(2);
+  const hasGstCharges = billType === 'subtotal' && (serviceChargeOn || gstOn);
+
+  const calculateSplitAmount = () => {
+    const total = otherParticipants.length + 1;
+    return (finalBillAmount / total).toFixed(2);
+  };
+
+  const getAmountFromPercentage = (person: string) => {
+    const pct = parseFloat(customPercentages[person] || '0');
+    return ((pct / 100) * finalBillAmount).toFixed(2);
+  };
+
+  const getAmountFromShares = (person: string) => {
+    const allKeys = [currentUser, ...otherParticipants];
+    const totalShares = allKeys.reduce((sum, k) => sum + (parseFloat(customShares[k] || '0') || 0), 0);
+    if (totalShares === 0) return '0.00';
+    const myShares = parseFloat(customShares[person] || '0') || 0;
+    return ((myShares / totalShares) * finalBillAmount).toFixed(2);
+  };
+
+  const getResolvedAmount = (person: string) => {
+    if (evenSplit) return calculateSplitAmount();
+    if (splitMethod === 'percentage') return getAmountFromPercentage(person);
+    if (splitMethod === 'shares') return getAmountFromShares(person);
+    return customAmounts[person] || '0.00';
+  };
+
+  // Settlement progress
+  const paidCount = participants.filter(p => p.trim() && paymentStatuses[p] === 'paid').length;
+  const totalParticipants = otherParticipants.length;
+  const paidAmount = participants.filter(p => p.trim() && paymentStatuses[p] === 'paid')
+    .reduce((sum, p) => sum + parseFloat(getResolvedAmount(p)), 0);
+  const settlementPct = totalParticipants > 0 ? (paidCount / totalParticipants) * 100 : 0;
+  const leftToPayPct = 100 - settlementPct;
+
+  const handleOCRScan = () => {
+    setOcrScanning(true);
+    setTimeout(() => {
+      const mockReceiptItems = [
+        { name: 'Grilled Chicken Pasta', price: 24.50, qty: 2 },
+        { name: 'Caesar Salad', price: 12.00, qty: 1 },
+        { name: 'Beef Burger', price: 18.50, qty: 1 },
+        { name: 'Truffle Fries', price: 15.00, qty: 2 },
+        { name: 'Iced Latte', price: 6.50, qty: 3 },
+        { name: 'Lemonade', price: 5.00, qty: 1 },
+        { name: 'Service Charge (10%)', price: 12.15, qty: 1 },
+        { name: 'GST (9%)', price: 11.85, qty: 1 }
+      ];
+      const total = mockReceiptItems.reduce((sum, item) => sum + (item.price * item.qty), 0);
+      setOcrItems(mockReceiptItems);
+      setBillAmount(total.toFixed(2));
+      setOcrScanning(false);
+      setStep('ocr-result');
+    }, 2000);
+  };
+
+  const handleScreenshotUpload = async (file: File) => {
+    if (!sessionId || !selectedPayer) return;
+    setUploadingScreenshot(true);
+    try {
+      await uploadScreenshot(sessionId, selectedPayer, file);
+      setUploadingScreenshot(false);
+      setScreenshotUploaded(true);
+      setStep('verify-payment');
+    } catch {
+      setUploadingScreenshot(false);
+    }
+  };
+
+  const handlePaymentVerification = async () => {
+    if (!sessionId || !selectedPayer) return;
+    setVerifyingPayment(true);
+    try {
+      await updatePaymentStatus(sessionId, selectedPayer, 'paid');
+      confirmPayment(selectedPayer);
+      setVerifyingPayment(false);
+      setScreenshotUploaded(false);
+      setStep('payment-confirmed');
+    } catch {
+      setVerifyingPayment(false);
+    }
+  };
+
+  const addParticipant = () => {
+    setParticipants([...participants, '']);
+  };
+
+  const updateParticipant = (index: number, value: string) => {
+    const newParticipants = [...participants];
+    newParticipants[index] = value;
+    setParticipants(newParticipants);
+  };
+
+  const removeParticipant = (index: number) => {
+    if (participants.length > 1) {
+      setParticipants(participants.filter((_, i) => i !== index));
+    }
+  };
+
+  const calculateSplit = () => calculateSplitAmount();
+
+  const generateQR = (participant: string) => {
+    setSelectedPayer(participant);
+    setStep('qr-display');
+  };
+
+  const confirmPayment = (participant: string) => {
+    setPaymentStatuses(prev => ({ ...prev, [participant]: 'paid' }));
+    setPaymentHistory(prev => [...prev, { name: participant, amount: getResolvedAmount(participant), time: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', hour12: false }) }]);
+  };
+
+  const markAllAsPaid = async () => {
+    const unpaid = participants.filter(p => p.trim() && paymentStatuses[p] !== 'paid');
+    const updated = { ...paymentStatuses };
+    const newHistory = [...paymentHistory];
+    for (const p of unpaid) {
+      updated[p] = 'paid';
+      newHistory.push({ name: p, amount: getResolvedAmount(p), time: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', hour12: false }) });
+      if (sessionId) {
+        try { await updatePaymentStatus(sessionId, p, 'paid'); } catch {}
+      }
+    }
+    setPaymentStatuses(updated);
+    setPaymentHistory(newHistory);
+  };
+
+  const allPaid = () => {
+    const validParticipants = participants.filter(p => p.trim());
+    return validParticipants.every(p => paymentStatuses[p] === 'paid');
+  };
+
+  const reset = () => {
+    setStep('start');
+    setBillAmount('');
+    setParticipants(['']);
+    setEvenSplit(null);
+    setCustomAmounts({});
+    setSplitConfirmed(false);
+    setPaymentStatuses({});
+    setSelectedPayer(null);
+    setOcrScanning(false);
+    setOcrItems([]);
+    setUploadingScreenshot(false);
+    setScreenshotUploaded(false);
+    setVerifyingPayment(false);
+    setRemindersSent({});
+    setSendingReminder(null);
+    setPayeeChoice('me');
+    setPayeePhone('');
+    setEventName('dinner');
+    setBillType('total');
+    setServiceChargeOn(false);
+    setGstOn(false);
+    setServiceChargeRate(10);
+    setGstRate(9);
+    setSplitMethod('amount');
+    setCustomPercentages({});
+    setCustomShares({});
+    setShowGstBreakdown(true);
+    setReviewTab('overview');
+    setOverviewTab('status');
+    setPaymentHistory([]);
+    setSessionId(null);
+  };
+
+  const handleSendReminder = async (participant: string) => {
+    setSendingReminder(participant);
+    if (sessionId) {
+      try { await sendReminders(sessionId); } catch {}
+    }
+    setTimeout(() => {
+      setRemindersSent(prev => ({ ...prev, [participant]: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit' }) }));
+      setSendingReminder(null);
+    }, 1200);
+  };
+
+  const handleSendAllReminders = async () => {
+    const unpaid = participants.filter(p => p.trim() && paymentStatuses[p] !== 'paid' && !remindersSent[p]);
+    if (sessionId) {
+      try { await sendReminders(sessionId); } catch {}
+    }
+    unpaid.forEach((p, i) => {
+      setTimeout(() => {
+        setRemindersSent(prev => ({ ...prev, [p]: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit' }) }));
+      }, 800 * (i + 1));
+    });
+  };
+
+  const handleConfirmSplit = async () => {
+    setSplitConfirmed(true);
+    setStep('overview');
+
+    // Create session via API
+    const validParticipants = participants.filter(p => p.trim());
+    const participantData = validParticipants.map(p => {
+      const member = knownMembers.find(m => m.name === p);
+      return {
+        name: p,
+        amount: getResolvedAmount(p),
+        telegram_id: member?.id || undefined,
+      };
+    });
+
+    // Get chat_id from URL if available
+    const params = new URLSearchParams(window.location.search);
+    const chatId = params.get('chat_id') || undefined;
+
+    try {
+      const session = await createSession({
+        event_name: eventName,
+        bill_amount: finalBillStr,
+        payee: currentUser,
+        payee_phone: payeePhone,
+        payee_amount: getResolvedAmount(currentUser),
+        even_split: !!evenSplit,
+        participants: participantData,
+        chat_id: chatId,
+      });
+      setSessionId(session.id);
+      // Update URL so this session is bookmarkable/revisitable
+      const url = new URL(window.location.href);
+      url.searchParams.set('session', session.id);
+      window.history.replaceState({}, '', url.toString());
+    } catch {
+      // API might not be available, continue with local state
+    }
+  };
+
+  // If not in TMA, show "Open via Telegram" message
+  if (!isTMA) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 flex items-center justify-center p-4">
+        <div className="bg-white/5 backdrop-filter backdrop-blur-lg border border-white/10 rounded-3xl p-8 max-w-sm text-center">
+          <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+            <DollarSign className="text-white" size={40} />
+          </div>
+          <h1 className="text-white text-2xl font-bold mb-2">GroupPay</h1>
+          <p className="text-blue-200 text-sm mb-6">Split bills, stay friends</p>
+          <p className="text-white/60 text-sm">
+            Open this app via Telegram to get started. Use the <span className="text-blue-300 font-semibold">/split</span> command in any group chat with the GroupPay bot.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-4 font-sans">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        .app-content * { font-family: 'DM Sans', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes shimmer { 0% { background-position: -1000px 0; } 100% { background-position: 1000px 0; } }
+        .animate-in { animation: slideIn 0.4s ease-out; }
+        .shimmer { background: linear-gradient(90deg, rgba(255,255,255,0.0) 0%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.0) 100%); background-size: 1000px 100%; animation: shimmer 2s infinite; }
+        .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .btn-primary { background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); transition: all 0.3s ease; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(59, 130, 246, 0.4); }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); transition: all 0.3s ease; }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); border-color: rgba(255, 255, 255, 0.3); }
+      `}</style>
+
+      {/* Hidden file input for screenshot upload */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) handleScreenshotUpload(file);
+        }}
+      />
+
+      {/* Header */}
+      <div className="max-w-md mx-auto mb-6 animate-in">
+        <div className="glass rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+                <DollarSign className="text-white" size={24} />
+              </div>
+              <div>
+                <h1 className="text-white text-xl font-bold">GroupPay</h1>
+                <p className="text-blue-200 text-xs">Split bills, stay friends</p>
+              </div>
+            </div>
+            <button onClick={reset} className="text-blue-200 hover:text-white text-sm px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition">Reset</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-md mx-auto">
+        {/* Start */}
+        {step === 'start' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="text-center mb-8">
+              <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-green-400 to-blue-500 flex items-center justify-center"><Users className="text-white" size={40} /></div>
+              <h2 className="text-white text-2xl font-bold mb-2">Start Bill Splitting</h2>
+              <p className="text-blue-200 text-sm">Quick, fair, transparent</p>
+            </div>
+            <div className="space-y-3">
+              <button onClick={() => setStep('ocr-choice')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><span>Let's split a bill</span><ArrowRight size={20} /></button>
+              <div className="pt-4 border-t border-white/10">
+                <p className="text-blue-200 text-xs text-center mb-3">Why GroupPay?</p>
+                <div className="space-y-2">
+                  {['No app downloads needed', 'Verified payment confirmations', 'Zero awkward follow-ups'].map(t => (
+                    <div key={t} className="flex items-center gap-2 text-white/80 text-sm"><CheckCircle size={16} className="text-green-400" /><span>{t}</span></div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* OCR Choice */}
+        {step === 'ocr-choice' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-6">How do you want to enter the bill?</h2>
+            <div className="space-y-3">
+              <button onClick={() => setStep('ocr-scan')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Camera size={20} /><span>Scan Receipt (OCR)</span></div><ArrowRight size={20} /></button>
+              <button onClick={() => setStep('manual-bill')} className="w-full btn-secondary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Edit2 size={20} /><span>Enter Manually</span></div><ArrowRight size={20} /></button>
+            </div>
+            <button onClick={() => setStep('start')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {/* OCR Scan */}
+        {step === 'ocr-scan' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">Scan Your Receipt</h2>
+            <p className="text-blue-200 text-sm mb-6">Position receipt within the frame</p>
+            <div className="relative bg-black/40 rounded-2xl p-4 mb-6 aspect-[3/4] flex items-center justify-center border-2 border-dashed border-blue-400/50">
+              {!ocrScanning ? (
+                <div className="text-center">
+                  <Camera className="text-blue-400 mx-auto mb-4" size={64} />
+                  <p className="text-white/70 text-sm mb-6">Ready to scan</p>
+                  <button onClick={handleOCRScan} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold">Capture Receipt</button>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <div className="w-16 h-16 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                  <p className="text-white font-semibold mb-2">Scanning receipt...</p>
+                  <p className="text-blue-200 text-sm">Extracting items and amounts</p>
+                </div>
+              )}
+            </div>
+            {!ocrScanning && <button onClick={() => setStep('ocr-choice')} className="w-full text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>}
+          </div>
+        )}
+
+        {/* OCR Result */}
+        {step === 'ocr-result' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="flex items-center gap-2 mb-6"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">Receipt Scanned Successfully</h2></div>
+            <div className="bg-white/5 rounded-xl p-4 mb-6 max-h-96 overflow-y-auto">
+              <div className="space-y-2">
+                {ocrItems.map((item, index) => (
+                  <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 2 ? 'border-b border-white/10' : ''}`}>
+                    <div className="flex-1"><div className="text-white text-sm">{item.name}</div>{item.qty > 1 && <div className="text-white/50 text-xs mono">Qty: {item.qty}</div>}</div>
+                    <div className="text-green-400 mono font-semibold">${(item.price * item.qty).toFixed(2)}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${billAmount}</span></div>
+            </div>
+            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />We found {ocrItems.length} items totaling ${billAmount}</p></div>
+            <button onClick={() => setStep('who-paid')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><span>Continue</span><ArrowRight size={20} /></button>
+            <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
+          </div>
+        )}
+
+        {/* Manual Bill with GST */}
+        {step === 'manual-bill' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">Enter Bill Amount</h2>
+            <p className="text-blue-200 text-sm mb-5">Does this amount already include GST?</p>
+
+            <div className="flex gap-2 mb-5">
+              <button
+                onClick={() => { setBillType('total'); setServiceChargeOn(false); setGstOn(false); }}
+                className={`flex-1 rounded-xl px-4 py-3 text-sm font-semibold transition-all border-2 ${
+                  billType === 'total'
+                    ? 'bg-blue-500/20 border-blue-400/60 text-white'
+                    : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
+                }`}
+              >
+                <div className="font-bold">Yes (Total)</div>
+                <div className="text-[10px] opacity-70 mt-0.5">Bill includes everything</div>
+              </button>
+              <button
+                onClick={() => setBillType('subtotal')}
+                className={`flex-1 rounded-xl px-4 py-3 text-sm font-semibold transition-all border-2 ${
+                  billType === 'subtotal'
+                    ? 'bg-amber-500/20 border-amber-400/60 text-white'
+                    : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
+                }`}
+              >
+                <div className="font-bold">No (Subtotal)</div>
+                <div className="text-[10px] opacity-70 mt-0.5">Need to add GST/SC</div>
+              </button>
+            </div>
+
+            <div className="mb-5">
+              <div className="text-white/50 text-xs mb-1.5">{billType === 'total' ? 'Total Amount' : 'Subtotal (before charges)'}</div>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-white/50 text-2xl mono">$</span>
+                <input type="number" value={billAmount} onChange={(e) => setBillAmount(e.target.value)} placeholder="0.00" className="w-full bg-white/10 border border-white/20 rounded-xl px-12 py-4 text-white text-2xl mono placeholder-white/30 focus:outline-none focus:border-blue-400" step="0.01" />
+              </div>
+            </div>
+
+            {billType === 'subtotal' && (
+              <div className="space-y-3 mb-5 animate-in">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setServiceChargeOn(true); setGstOn(true); setServiceChargeRate(10); setGstRate(9); }}
+                    className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
+                      serviceChargeOn && gstOn && serviceChargeRate === 10 && gstRate === 9
+                        ? 'bg-green-500/20 border-green-400/50 text-green-300'
+                        : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                    }`}
+                  >
+                    SG Standard<br /><span className="opacity-70">10% SC + 9% GST</span>
+                  </button>
+                  <button
+                    onClick={() => { setServiceChargeOn(false); setGstOn(false); }}
+                    className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
+                      !serviceChargeOn && !gstOn
+                        ? 'bg-white/10 border-white/30 text-white'
+                        : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                    }`}
+                  >
+                    No Taxes<br /><span className="opacity-70">Use subtotal as-is</span>
+                  </button>
+                </div>
+
+                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-white text-sm font-semibold">Service Charge</div>
+                      <div className="text-white/40 text-xs">{serviceChargeRate}% of subtotal</div>
+                    </div>
+                    <button
+                      onClick={() => setServiceChargeOn(!serviceChargeOn)}
+                      className={`w-11 h-6 rounded-full transition-all relative ${serviceChargeOn ? 'bg-blue-500' : 'bg-white/20'}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${serviceChargeOn ? 'left-[22px]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-white text-sm font-semibold">GST</div>
+                      <div className="text-white/40 text-xs">{gstRate}% of subtotal + SC</div>
+                    </div>
+                    <button
+                      onClick={() => setGstOn(!gstOn)}
+                      className={`w-11 h-6 rounded-full transition-all relative ${gstOn ? 'bg-blue-500' : 'bg-white/20'}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${gstOn ? 'left-[22px]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                {subtotalAmount > 0 && (serviceChargeOn || gstOn) && (
+                  <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-xl p-4 border border-green-400/20 animate-in">
+                    <button onClick={() => setShowGstBreakdown(!showGstBreakdown)} className="w-full flex items-center justify-between mb-2">
+                      <span className="text-green-300 text-xs font-bold uppercase tracking-wider">Breakdown</span>
+                      <span className="text-white/40 text-xs">{showGstBreakdown ? 'Hide' : 'Show'}</span>
+                    </button>
+                    {showGstBreakdown && (
+                      <div className="space-y-2 text-sm mono">
+                        <div className="flex justify-between"><span className="text-white/70">Subtotal</span><span className="text-white">${subtotalAmount.toFixed(2)}</span></div>
+                        {serviceChargeOn && (
+                          <div className="flex justify-between"><span className="text-white/70">Service ({serviceChargeRate}%)</span><span className="text-amber-300">+${serviceChargeAmount.toFixed(2)}</span></div>
+                        )}
+                        {gstOn && (
+                          <div className="flex justify-between"><span className="text-white/70">GST ({gstRate}%)</span><span className="text-amber-300">+${gstAmount.toFixed(2)}</span></div>
+                        )}
+                        <div className="border-t border-white/20 pt-2 flex justify-between font-bold"><span className="text-white">Total</span><span className="text-green-400">${finalBillStr}</span></div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button onClick={() => setStep('who-paid')} disabled={!billAmount || parseFloat(billAmount) <= 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed">
+              <span>Continue{hasGstCharges ? ` — $${finalBillStr}` : ''}</span><ArrowRight size={20} />
+            </button>
+            <button onClick={() => setStep('ocr-choice')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {/* Who Paid the Bill? */}
+        {step === 'who-paid' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="text-center mb-6">
+              <div className="w-16 h-16 mx-auto mb-3 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center"><DollarSign className="text-white" size={32} /></div>
+              <h2 className="text-white text-xl font-bold mb-1">Who Paid the Bill?</h2>
+              <p className="text-blue-200 text-sm">This person will receive everyone's payments</p>
+            </div>
+            <div className="space-y-3 mb-6">
+              <button
+                onClick={() => { setPayeeChoice('me'); if (isTMA && window.Telegram?.WebApp?.initDataUnsafe?.user?.first_name) setCurrentUser(window.Telegram.WebApp.initDataUnsafe.user.first_name); }}
+                className={`w-full rounded-xl px-4 py-4 text-left transition-all border-2 ${
+                  payeeChoice === 'me'
+                    ? 'bg-amber-500/20 border-amber-400/60 text-white'
+                    : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${payeeChoice === 'me' ? 'border-amber-400 bg-amber-400' : 'border-white/30'}`}>
+                    {payeeChoice === 'me' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-sm">I paid</div>
+                    <div className="text-xs opacity-60">I'm collecting payments from others</div>
+                  </div>
+                </div>
+              </button>
+              {payeeChoice === 'me' && (
+                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-3 animate-in">
+                  <div>
+                    <div className="text-white/50 text-xs mb-1">Your name</div>
+                    {knownMembers.length > 0 ? (
+                      <div className="space-y-2">
+                        {knownMembers.map(m => (
+                          <button
+                            key={m.id}
+                            onClick={() => { setCurrentUser(m.name); if (m.id) setMyTelegramId(m.id); }}
+                            className={`w-full text-left px-3 py-2.5 rounded-lg text-sm mono transition-all border ${
+                              currentUser === m.name
+                                ? 'bg-amber-500/20 border-amber-400/50 text-white'
+                                : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                            }`}
+                          >
+                            @{m.name}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <input
+                        type="text"
+                        value={currentUser === 'you' ? '' : currentUser}
+                        onChange={(e) => setCurrentUser(e.target.value)}
+                        placeholder="e.g. Chris"
+                        className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2.5 text-white mono text-sm placeholder-white/30 focus:outline-none focus:border-amber-400"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => setPayeeChoice('other')}
+                className={`w-full rounded-xl px-4 py-4 text-left transition-all border-2 ${
+                  payeeChoice === 'other'
+                    ? 'bg-amber-500/20 border-amber-400/60 text-white'
+                    : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${payeeChoice === 'other' ? 'border-amber-400 bg-amber-400' : 'border-white/30'}`}>
+                    {payeeChoice === 'other' && <div className="w-2 h-2 rounded-full bg-white"></div>}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-sm">Someone else</div>
+                    <div className="text-xs opacity-60">A friend paid, I'm helping organize</div>
+                  </div>
+                </div>
+              </button>
+              {payeeChoice === 'other' && (
+                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-3 animate-in">
+                  <div>
+                    <div className="text-white/50 text-xs mb-1">Who paid?</div>
+                    {knownMembers.length > 0 ? (
+                      <div className="space-y-2">
+                        {knownMembers.map(m => (
+                          <button
+                            key={m.id}
+                            onClick={() => { setCurrentUser(m.name); if (m.id) setMyTelegramId(m.id); }}
+                            className={`w-full text-left px-3 py-2.5 rounded-lg text-sm mono transition-all border ${
+                              currentUser === m.name
+                                ? 'bg-amber-500/20 border-amber-400/50 text-white'
+                                : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                            }`}
+                          >
+                            @{m.name}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                    <input
+                      type="text"
+                      value={currentUser === 'you' ? '' : currentUser}
+                      onChange={(e) => setCurrentUser(e.target.value)}
+                      placeholder="e.g. Tom"
+                      className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2.5 text-white mono text-sm placeholder-white/30 focus:outline-none focus:border-amber-400"
+                    />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="bg-white/5 rounded-xl px-4 py-3 border border-white/10 mb-4">
+              <div className="text-white/50 text-xs mb-1">Event name</div>
+              <input
+                type="text"
+                value={eventName}
+                onChange={(e) => setEventName(e.target.value)}
+                placeholder="e.g. dinner, birthday party"
+                className="w-full bg-transparent text-white mono text-sm outline-none placeholder-white/30"
+              />
+            </div>
+            <div className={`bg-white/5 rounded-xl px-4 py-3 border mb-4 ${payeePhone.length === 8 && /^[89]/.test(payeePhone) ? 'border-green-400/30' : payeePhone.length > 0 ? 'border-red-400/30' : 'border-white/10'}`}>
+              <div className="text-white/50 text-xs mb-1">PayNow phone number (for QR code)</div>
+              <div className="flex items-center gap-2">
+                <span className="text-white/50 mono text-sm">+65</span>
+                <input
+                  type="tel"
+                  value={payeePhone}
+                  onChange={(e) => {
+                    let val = e.target.value.replace(/\D/g, '');
+                    // Strip leading 65 if user types +65
+                    if (val.startsWith('65') && val.length > 8) val = val.slice(2);
+                    setPayeePhone(val.slice(0, 8));
+                  }}
+                  placeholder="9123 4567"
+                  className="w-full bg-transparent text-white mono text-sm outline-none placeholder-white/30"
+                  maxLength={8}
+                />
+              </div>
+              {payeePhone.length > 0 && payeePhone.length < 8 && (
+                <div className="text-red-400 text-[10px] mt-1">Enter 8 digits</div>
+              )}
+              {payeePhone.length === 8 && !/^[89]/.test(payeePhone) && (
+                <div className="text-red-400 text-[10px] mt-1">SG mobile numbers start with 8 or 9</div>
+              )}
+              {payeePhone.length === 8 && /^[89]/.test(payeePhone) && (
+                <div className="text-green-400 text-[10px] mt-1">+65 {payeePhone.slice(0,4)} {payeePhone.slice(4)}</div>
+              )}
+            </div>
+            <div className="bg-amber-500/10 rounded-xl p-4 border border-amber-400/20 mb-6">
+              <div className="text-amber-300 text-xs font-semibold mb-1">Please confirm your details</div>
+              <div className="space-y-1 text-sm">
+                <div className="flex justify-between"><span className="text-white/60">Payee:</span><span className="text-white mono">@{currentUser}</span></div>
+                <div className="flex justify-between"><span className="text-white/60">PayNow:</span><span className="text-white mono">{payeePhone.length === 8 ? `+65 ${payeePhone.slice(0,4)} ${payeePhone.slice(4)}` : '—'}</span></div>
+                <div className="flex justify-between"><span className="text-white/60">Event:</span><span className="text-white">{eventName}</span></div>
+              </div>
+            </div>
+            <button
+              onClick={() => setStep('participants')}
+              disabled={!currentUser || currentUser === 'you' || payeePhone.length !== 8 || !/^[89]/.test(payeePhone)}
+              className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span>Confirm & Continue</span><ArrowRight size={20} />
+            </button>
+            <button onClick={() => setStep(ocrItems.length > 0 ? 'ocr-result' : 'manual-bill')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {/* Participants */}
+        {step === 'participants' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">Add Participants</h2>
+            <p className="text-blue-200 text-sm mb-2">Who owes money to @{currentUser}?</p>
+            <div className="bg-amber-500/10 rounded-lg px-3 py-2 mb-6 border border-amber-400/20">
+              <p className="text-amber-200 text-xs">Payments will go to <strong className="text-amber-300 mono">@{currentUser}</strong> for <strong className="text-white">{eventName}</strong></p>
+            </div>
+
+            {knownMembers.length > 0 && (
+              <div className="space-y-2 mb-4">
+                <p className="text-white/60 text-xs uppercase tracking-wider font-semibold mb-2">Group Members</p>
+                <div className="bg-blue-500/10 rounded-lg px-3 py-2 mb-3 border border-blue-400/20">
+                  <p className="text-blue-200 text-xs">The bot can only see members who have <strong className="text-blue-300">messaged</strong> or <strong className="text-blue-300">joined</strong> the group after it was added.</p>
+                </div>
+                {knownMembers.filter(m => !isPayerParticipant(m.name)).map((member) => {
+                  const isSelected = participants.includes(member.name);
+                  return (
+                    <label key={member.id || member.name} className="flex items-center gap-3 bg-white/5 hover:bg-white/10 rounded-xl px-4 py-3 cursor-pointer transition border border-white/10">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {
+                          if (isSelected) {
+                            setParticipants(participants.filter(p => p !== member.name));
+                          } else {
+                            const firstEmpty = participants.findIndex(p => !p.trim());
+                            if (firstEmpty >= 0) {
+                              const next = [...participants];
+                              next.splice(firstEmpty, 0, member.name);
+                              setParticipants(next);
+                            } else {
+                              setParticipants([...participants, member.name]);
+                            }
+                          }
+                        }}
+                        className="w-5 h-5 rounded border-white/30 accent-blue-500"
+                      />
+                      <span className="text-white text-sm font-medium">{member.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="space-y-3 mb-6">
+              {participants.map((participant, index) => {
+                if (knownMembers.length > 0 && knownMembers.some(m => m.name === participant)) return null;
+                return (
+                  <div key={index} className="flex gap-2">
+                    <div className="flex-1 relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50">@</span>
+                      <input type="text" value={participant} onChange={(e) => updateParticipant(index, e.target.value)} placeholder="telehandle" className="w-full bg-white/10 border border-white/20 rounded-xl pl-8 pr-4 py-3 text-white mono text-sm placeholder-white/30 focus:outline-none focus:border-blue-400" />
+                    </div>
+                    <button onClick={() => removeParticipant(index)} className="px-3 py-3 bg-red-500/20 hover:bg-red-500/30 rounded-xl text-red-300 transition"><XCircle size={20} /></button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button onClick={addParticipant} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold mb-4">+ Add Another Person</button>
+            <button onClick={() => setStep('split-type')} disabled={participants.filter(p => p.trim()).length === 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"><span>Continue</span><ArrowRight size={20} /></button>
+            <button onClick={() => setStep('who-paid')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {/* Split Type */}
+        {step === 'split-type' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">How should we split?</h2>
+            <p className="text-blue-200 text-sm mb-6">Total: <span className="mono font-bold text-white">${finalBillStr}</span></p>
+            <div className="space-y-3">
+              <button onClick={() => { setEvenSplit(true); setStep('review-split'); }} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Users size={20} /><span>Split Evenly</span></div><ArrowRight size={20} /></button>
+
+              <div className="border-t border-white/10 pt-3 mt-3">
+                <p className="text-white/50 text-xs mb-3 uppercase tracking-wider font-semibold">Custom Split Method</p>
+                <div className="flex gap-1 bg-white/5 rounded-xl p-1 mb-3 border border-white/10">
+                  {[
+                    { key: 'amount' as const, label: '$ Amount', icon: '$' },
+                    { key: 'percentage' as const, label: '% Percent', icon: '%' },
+                    { key: 'shares' as const, label: '# Shares', icon: '#' },
+                  ].map(m => (
+                    <button
+                      key={m.key}
+                      onClick={() => setSplitMethod(m.key)}
+                      className={`flex-1 rounded-lg px-2 py-2.5 text-xs font-semibold transition-all ${
+                        splitMethod === m.key
+                          ? 'bg-blue-500 text-white shadow-lg'
+                          : 'text-white/50 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      <div>{m.icon}</div>
+                      <div className="mt-0.5">{m.label}</div>
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => { setEvenSplit(false); setStep('custom-split'); }} className="w-full btn-secondary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Edit2 size={20} /><span>Custom Split ({splitMethod === 'amount' ? 'by Amount' : splitMethod === 'percentage' ? 'by %' : 'by Shares'})</span></div><ArrowRight size={20} /></button>
+              </div>
+            </div>
+            <button onClick={() => setStep('participants')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {/* Custom Split */}
+        {step === 'custom-split' && (() => {
+          const total = finalBillAmount;
+          const allKeys = [currentUser, ...otherParticipants];
+
+          let assigned = 0;
+          let remaining = 0;
+          let pct = 0;
+          let isValid = false;
+
+          if (splitMethod === 'amount') {
+            assigned = allKeys.reduce((sum, k) => sum + (parseFloat(customAmounts[k] || '') || 0), 0);
+            remaining = total - assigned;
+            pct = total > 0 ? Math.min((assigned / total) * 100, 100) : 0;
+            isValid = Math.abs(remaining) < 0.01;
+          } else if (splitMethod === 'percentage') {
+            const totalPct = allKeys.reduce((sum, k) => sum + (parseFloat(customPercentages[k] || '') || 0), 0);
+            assigned = totalPct;
+            remaining = 100 - totalPct;
+            pct = Math.min(totalPct, 100);
+            isValid = Math.abs(remaining) < 0.01;
+          } else {
+            const totalShares = allKeys.reduce((sum, k) => sum + (parseFloat(customShares[k] || '') || 0), 0);
+            assigned = totalShares;
+            isValid = totalShares > 0;
+            pct = 100;
+            remaining = 0;
+          }
+
+          const tallyColor = isValid ? 'bg-green-500' : (splitMethod === 'amount' && assigned > total) || (splitMethod === 'percentage' && assigned > 100) ? 'bg-red-500' : 'bg-amber-500';
+          const tallyTextColor = isValid ? 'text-green-400' : (splitMethod === 'amount' && assigned > total) || (splitMethod === 'percentage' && assigned > 100) ? 'text-red-400' : 'text-amber-400';
+
+          const unfilledCount = allKeys.filter(k => {
+            if (splitMethod === 'amount') return !customAmounts[k] || parseFloat(customAmounts[k]) === 0;
+            if (splitMethod === 'percentage') return !customPercentages[k] || parseFloat(customPercentages[k]) === 0;
+            return !customShares[k] || parseFloat(customShares[k]) === 0;
+          }).length;
+
+          return (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">
+              {splitMethod === 'amount' ? 'Enter Custom Amounts' : splitMethod === 'percentage' ? 'Enter Percentages' : 'Enter Shares'}
+            </h2>
+            <p className="text-blue-200 text-sm mb-3">Total: <span className="mono font-bold text-white">${total.toFixed(2)}</span></p>
+
+            <div className="flex gap-1 bg-white/5 rounded-xl p-1 mb-4 border border-white/10">
+              {[
+                { key: 'amount' as const, label: '$ Amt' },
+                { key: 'percentage' as const, label: '% Pct' },
+                { key: 'shares' as const, label: '# Share' },
+              ].map(m => (
+                <button
+                  key={m.key}
+                  onClick={() => setSplitMethod(m.key)}
+                  className={`flex-1 rounded-lg px-2 py-2 text-xs font-semibold transition-all ${
+                    splitMethod === m.key
+                      ? 'bg-blue-500 text-white shadow-lg'
+                      : 'text-white/50 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="bg-white/5 rounded-xl p-4 mb-5 border border-white/10">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-white/70 text-sm">{splitMethod === 'shares' ? 'Total Shares' : 'Assigned'}</span>
+                <span className={`mono text-sm font-bold ${tallyTextColor}`}>
+                  {splitMethod === 'amount' ? `$${assigned.toFixed(2)} / $${total.toFixed(2)}` :
+                   splitMethod === 'percentage' ? `${assigned.toFixed(1)}% / 100%` :
+                   `${assigned} shares`}
+                </span>
+              </div>
+              <div className="w-full h-2.5 bg-white/10 rounded-full overflow-hidden mb-2">
+                <div className={`h-full rounded-full transition-all duration-300 ${tallyColor}`} style={{ width: `${pct}%` }} />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className={`text-xs font-semibold ${tallyTextColor}`}>
+                  {isValid ? 'Perfectly balanced' :
+                   splitMethod === 'amount' ? (assigned > total ? `Over by $${(assigned - total).toFixed(2)}` : `$${remaining.toFixed(2)} remaining`) :
+                   splitMethod === 'percentage' ? (assigned > 100 ? `Over by ${(assigned - 100).toFixed(1)}%` : `${remaining.toFixed(1)}% remaining`) :
+                   'Enter shares for each person'}
+                </span>
+                {splitMethod === 'amount' && remaining > 0.01 && unfilledCount > 0 && (
+                  <button onClick={() => {
+                    const perPerson = remaining / unfilledCount;
+                    const updated = { ...customAmounts };
+                    allKeys.forEach(k => {
+                      if (!updated[k] || parseFloat(updated[k]) === 0) updated[k] = perPerson.toFixed(2);
+                    });
+                    setCustomAmounts(updated);
+                  }} className="text-xs text-blue-300 hover:text-blue-200 underline transition">Split remaining evenly</button>
+                )}
+                {splitMethod === 'percentage' && remaining > 0.1 && unfilledCount > 0 && (
+                  <button onClick={() => {
+                    const perPerson = remaining / unfilledCount;
+                    const updated = { ...customPercentages };
+                    allKeys.forEach(k => {
+                      if (!updated[k] || parseFloat(updated[k]) === 0) updated[k] = perPerson.toFixed(1);
+                    });
+                    setCustomPercentages(updated);
+                  }} className="text-xs text-blue-300 hover:text-blue-200 underline transition">Split remaining evenly</button>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-3 mb-6">
+              {allKeys.map((person) => {
+                const isPayee = person === currentUser;
+                const resolvedAmt = splitMethod === 'percentage' ? getAmountFromPercentage(person) : splitMethod === 'shares' ? getAmountFromShares(person) : (customAmounts[person] || '0.00');
+                return (
+                  <div key={person} className={`rounded-xl p-4 ${isPayee ? 'bg-blue-500/10 border border-blue-400/20' : 'bg-white/5'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-white mono text-sm">@{person} {isPayee && <span className="text-blue-300 text-xs">(Payee)</span>}</span>
+                      {splitMethod !== 'amount' && (
+                        <span className="text-green-400 mono text-xs font-semibold">= ${resolvedAmt}</span>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50 mono">
+                        {splitMethod === 'amount' ? '$' : splitMethod === 'percentage' ? '%' : '#'}
+                      </span>
+                      <input
+                        type="number"
+                        value={splitMethod === 'amount' ? (customAmounts[person] || '') : splitMethod === 'percentage' ? (customPercentages[person] || '') : (customShares[person] || '')}
+                        onChange={(e) => {
+                          if (splitMethod === 'amount') setCustomAmounts({ ...customAmounts, [person]: e.target.value });
+                          else if (splitMethod === 'percentage') setCustomPercentages({ ...customPercentages, [person]: e.target.value });
+                          else setCustomShares({ ...customShares, [person]: e.target.value });
+                        }}
+                        placeholder={splitMethod === 'amount' ? '0.00' : splitMethod === 'percentage' ? '0' : '1'}
+                        className="w-full bg-white/10 border border-white/20 rounded-lg pl-8 pr-4 py-2 text-white mono placeholder-white/30 focus:outline-none focus:border-blue-400"
+                        step={splitMethod === 'amount' ? '0.01' : '1'}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={() => setStep('review-split')} disabled={!isValid} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"><span>{isValid ? 'Review Split' : splitMethod === 'amount' ? `$${remaining.toFixed(2)} remaining` : splitMethod === 'percentage' ? `${remaining.toFixed(1)}% remaining` : 'Enter shares'}</span><ArrowRight size={20} /></button>
+            <button onClick={() => setStep('split-type')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+          );
+        })()}
+
+        {/* Review Split Screen */}
+        {step === 'review-split' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center">
+                <CheckCircle className="text-white" size={22} />
+              </div>
+              <div>
+                <h2 className="text-white text-xl font-bold">Review Split</h2>
+                <p className="text-blue-200 text-xs">Confirm before sending to group</p>
+              </div>
+            </div>
+
+            <div className="flex gap-1 bg-white/5 rounded-xl p-1 my-4 border border-white/10">
+              <button onClick={() => setReviewTab('overview')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${reviewTab === 'overview' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
+                Overview
+              </button>
+              <button onClick={() => setReviewTab('details')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${reviewTab === 'details' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
+                Split Details
+              </button>
+            </div>
+
+            {reviewTab === 'overview' && (
+              <div className="bg-white/5 rounded-xl p-4 mb-5">
+                {hasGstCharges ? (
+                  <div className="mb-3 pb-3 border-b border-white/10 space-y-1.5">
+                    <div className="flex justify-between"><span className="text-white/50 text-sm">Subtotal</span><span className="text-white mono text-sm">${subtotalAmount.toFixed(2)}</span></div>
+                    {serviceChargeOn && <div className="flex justify-between"><span className="text-white/50 text-sm">Service ({serviceChargeRate}%)</span><span className="text-amber-300 mono text-sm">+${serviceChargeAmount.toFixed(2)}</span></div>}
+                    {gstOn && <div className="flex justify-between"><span className="text-white/50 text-sm">GST ({gstRate}%)</span><span className="text-amber-300 mono text-sm">+${gstAmount.toFixed(2)}</span></div>}
+                    <div className="flex justify-between items-center pt-1.5 border-t border-white/10"><span className="text-white font-bold">Total</span><span className="text-green-400 text-xl mono font-bold">${finalBillStr}</span></div>
+                  </div>
+                ) : (
+                  <div className="flex justify-between items-center mb-3 pb-3 border-b border-white/10"><span className="text-white/70">Total Bill</span><span className="text-white text-xl mono font-bold">${finalBillStr}</span></div>
+                )}
+
+                <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">
+                  {evenSplit ? 'Even Split' : `Custom Split (by ${splitMethod})`} · {otherParticipants.length + 1} people
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 mb-3">
+                  <div className="bg-white/5 rounded-lg p-2 text-center"><div className="text-green-400 mono font-bold text-sm">${finalBillStr}</div><div className="text-white/40 text-[10px]">Total</div></div>
+                  <div className="bg-white/5 rounded-lg p-2 text-center"><div className="text-blue-400 font-bold text-sm">{otherParticipants.length + 1}</div><div className="text-white/40 text-[10px]">People</div></div>
+                  <div className="bg-white/5 rounded-lg p-2 text-center"><div className="text-purple-400 mono font-bold text-sm">${evenSplit ? calculateSplit() : '~'}</div><div className="text-white/40 text-[10px]">Avg/Person</div></div>
+                </div>
+
+                <div className="flex justify-between items-center bg-blue-500/10 rounded-lg px-3 py-2.5 border border-blue-400/20 mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-white mono text-sm">@{currentUser}</span>
+                    <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Payee</span>
+                  </div>
+                  <span className="text-blue-400 mono font-semibold">${getResolvedAmount(currentUser)}</span>
+                </div>
+                {otherParticipants.map((participant) => (
+                  <div key={participant} className="flex justify-between items-center bg-white/5 rounded-lg px-3 py-2.5 mb-1">
+                    <span className="text-white mono text-sm">@{participant}</span>
+                    <span className="text-green-400 mono font-semibold">${getResolvedAmount(participant)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {reviewTab === 'details' && (
+              <div className="bg-white/5 rounded-xl p-4 mb-5">
+                <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">
+                  Split by {splitMethod === 'shares' ? 'Shares' : splitMethod === 'percentage' ? 'Percentage' : 'Amount'}
+                </div>
+                {[currentUser, ...otherParticipants].map((person) => {
+                  const amt = parseFloat(getResolvedAmount(person));
+                  const pctOfTotal = finalBillAmount > 0 ? (amt / finalBillAmount) * 100 : 0;
+                  const shareCount = splitMethod === 'shares' ? (customShares[person] || (evenSplit ? '1' : '0')) : null;
+                  return (
+                    <div key={person} className="mb-3 last:mb-0">
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-white mono text-sm">@{person}</span>
+                          {person === currentUser && <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Payee</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {shareCount && <span className="text-white/40 text-xs">{shareCount} shares</span>}
+                          <span className="text-green-400 mono text-sm font-semibold">${getResolvedAmount(person)}</span>
+                        </div>
+                      </div>
+                      <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                        <div className="h-full rounded-full bg-gradient-to-r from-blue-400 to-cyan-400 transition-all" style={{ width: `${pctOfTotal}%` }} />
+                      </div>
+                      <div className="text-right text-white/30 text-[10px] mt-0.5">{pctOfTotal.toFixed(1)}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <button
+                onClick={handleConfirmSplit}
+                className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-400 hover:to-blue-500 text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-center gap-3 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-blue-500/30 group"
+              >
+                <span>Send to Group</span>
+                <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+              </button>
+              <button onClick={() => setStep(evenSplit ? 'split-type' : 'custom-split')} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
+            </div>
+          </div>
+        )}
+
+        {/* Payment Status Overview */}
+        {step === 'overview' && splitConfirmed && (
+           <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-1">Payment Status</h2>
+            <p className="text-blue-200 text-sm mb-3">
+              {paidCount === totalParticipants
+                ? 'All payments received!'
+                : `${totalParticipants - paidCount} ${totalParticipants - paidCount === 1 ? 'person needs' : 'people need'} to pay you back`}
+            </p>
+
+            <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 rounded-xl p-4 mb-4 border border-blue-400/20">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-white text-sm font-semibold">Settlement Progress</span>
+                <span className="text-blue-300 mono text-sm font-bold">{paidCount}/{totalParticipants} paid</span>
+              </div>
+              <div className="w-full h-3 bg-white/10 rounded-full overflow-hidden mb-2">
+                <div className="h-full rounded-full bg-gradient-to-r from-green-400 to-emerald-500 transition-all duration-500" style={{ width: `${settlementPct}%` }} />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-white/50 text-xs">${paidAmount.toFixed(2)} collected</span>
+                <span className={`text-xs font-semibold ${leftToPayPct === 0 ? 'text-green-400' : 'text-amber-400'}`}>
+                  {leftToPayPct === 0 ? 'All settled!' : `${Math.round(leftToPayPct)}% left to settle`}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex gap-1 bg-white/5 rounded-xl p-1 mb-4 border border-white/10">
+              <button onClick={() => setOverviewTab('status')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'status' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
+                Status
+              </button>
+              <button onClick={() => setOverviewTab('history')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'history' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
+                History
+              </button>
+            </div>
+
+            {overviewTab === 'status' && (
+              <>
+                <div className="space-y-3 mb-4">
+                  {otherParticipants.map((participant) => (
+                    <div key={participant} className={`rounded-xl p-4 flex items-center justify-between border transition-all ${paymentStatuses[participant] === 'paid' ? 'bg-green-500/5 border-green-500/20' : 'bg-white/5 border-white/10'}`}>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={async () => {
+                            if (paymentStatuses[participant] !== 'paid') {
+                              if (sessionId) {
+                                try { await updatePaymentStatus(sessionId, participant, 'paid'); } catch {}
+                              }
+                              confirmPayment(participant);
+                            }
+                          }}
+                          className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shrink-0 ${
+                            paymentStatuses[participant] === 'paid'
+                              ? 'bg-green-500 border-green-400'
+                              : 'border-white/30 hover:border-blue-400'
+                          }`}
+                        >
+                          {paymentStatuses[participant] === 'paid' && <CheckCircle className="text-white" size={14} />}
+                        </button>
+                        <div>
+                          <div className="text-white mono text-sm">@{participant}</div>
+                          <div className={`mono text-xs font-semibold ${paymentStatuses[participant] === 'paid' ? 'text-green-400' : 'text-white/50'}`}>
+                            ${getResolvedAmount(participant)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {paymentStatuses[participant] === 'paid' ? (
+                          <span className="text-green-400 text-xs font-semibold flex items-center gap-1"><CheckCircle size={14} />Verified</span>
+                        ) : (
+                          <button onClick={() => generateQR(participant)} className="btn-primary text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5"><QrCode size={14} />QR</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {!allPaid() && (
+                  <div className="space-y-2 mb-4">
+                    {totalParticipants - paidCount > 1 && (
+                      <button onClick={markAllAsPaid} className="w-full bg-green-500/10 hover:bg-green-500/20 border border-green-400/30 text-green-300 px-4 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all">
+                        <CheckCircle size={16} />
+                        Mark All as Paid
+                      </button>
+                    )}
+                    <button onClick={() => setStep('reminder')} className="w-full btn-secondary text-white px-4 py-3 rounded-xl font-semibold flex items-center justify-center gap-2">
+                      <Bell size={16} />Send Reminders ({totalParticipants - paidCount} unpaid)
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {overviewTab === 'history' && (
+              <div className="mb-4">
+                {paymentHistory.length === 0 ? (
+                  <div className="bg-white/5 rounded-xl p-6 text-center">
+                    <Clock className="text-white/20 mx-auto mb-2" size={32} />
+                    <p className="text-white/40 text-sm">No payments recorded yet</p>
+                    <p className="text-white/20 text-xs mt-1">Payment confirmations will appear here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {paymentHistory.map((entry, i) => (
+                      <div key={i} className="bg-green-500/5 rounded-xl p-3 border border-green-500/20 flex items-center gap-3" style={{ animation: `slideIn 0.3s ease-out ${i * 0.1}s both` }}>
+                        <div className="w-8 h-8 rounded-lg bg-green-500/20 flex items-center justify-center shrink-0">
+                          <CheckCircle className="text-green-400" size={16} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-white mono text-sm">@{entry.name}</div>
+                          <div className="text-white/40 text-[10px]">Paid at {entry.time}</div>
+                        </div>
+                        <span className="text-green-400 mono text-sm font-semibold">${entry.amount}</span>
+                      </div>
+                    ))}
+                    <div className="bg-white/5 rounded-lg p-3 mt-3">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-white/50">Total Collected</span>
+                        <span className="text-green-400 mono font-bold">${paymentHistory.reduce((s, e) => s + parseFloat(e.amount), 0).toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {allPaid() && (
+              <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-2xl p-6 mb-4 border border-green-400/30 animate-in">
+                <div className="text-center mb-4">
+                  <div className="w-20 h-20 mx-auto rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center animate-bounce">
+                    <CheckCircle className="text-white" size={48} />
+                  </div>
+                  <h3 className="text-white text-xl font-bold mt-3 mb-1">All Settled!</h3>
+                  <p className="text-green-200 text-sm">Everyone has paid their share.</p>
+                </div>
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  <div className="bg-white/5 rounded-xl p-2 text-center"><div className="text-green-400 mono font-bold">${finalBillStr}</div><div className="text-white/40 text-[10px]">Total</div></div>
+                  <div className="bg-white/5 rounded-xl p-2 text-center"><div className="text-blue-400 font-bold">{otherParticipants.length + 1}</div><div className="text-white/40 text-[10px]">People</div></div>
+                  <div className="bg-white/5 rounded-xl p-2 text-center"><div className="text-purple-400 mono font-bold">${evenSplit ? calculateSplit() : '—'}</div><div className="text-white/40 text-[10px]">Per Person</div></div>
+                </div>
+                {/* Referral Section */}
+                <div className="bg-blue-500/10 rounded-xl p-4 mb-4 border border-blue-400/20">
+                  <div className="text-white text-sm font-bold mb-1">Share GroupPay</div>
+                  <p className="text-blue-200 text-xs mb-3">Invite friends to try GroupPay for their next group bill</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => {
+                      const tg = window.Telegram?.WebApp;
+                      if (tg) tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(window.location.origin)}&text=${encodeURIComponent('Try GroupPay for splitting bills!')}`);
+                    }} className="flex-1 bg-[#0088cc]/20 hover:bg-[#0088cc]/30 text-[#6ab2f2] text-xs font-semibold py-2 rounded-lg transition flex items-center justify-center gap-1">Telegram</button>
+                    <button onClick={() => { navigator.clipboard.writeText(window.location.origin); }} className="flex-1 bg-white/10 hover:bg-white/15 text-white/70 text-xs font-semibold py-2 rounded-lg transition flex items-center justify-center gap-1">Copy Link</button>
+                  </div>
+                </div>
+
+                <button onClick={reset} className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-400 hover:to-emerald-500 text-white px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all hover:-translate-y-0.5"><DollarSign size={18} />Split Another Bill</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* QR Display — real QR from API */}
+        {step === 'qr-display' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">Payment QR Code</h2>
+            <p className="text-blue-200 text-sm mb-2">For @{selectedPayer} — paying to @{currentUser}</p>
+            <p className="text-white/50 text-xs mb-6">Event: {eventName}</p>
+            <div className="bg-white rounded-2xl p-6 mb-6">
+              {sessionId ? (
+                <img
+                  src={qrUrl(sessionId, selectedPayer!)}
+                  alt="Payment QR Code"
+                  className="w-64 h-64 mx-auto"
+                />
+              ) : (
+                <div className="w-64 h-64 mx-auto bg-gradient-to-br from-blue-100 to-blue-50 rounded-xl flex items-center justify-center">
+                  <div className="text-center">
+                    <QrCode className="text-blue-600 mx-auto mb-3" size={80} />
+                    <div className="text-blue-900 font-bold text-lg mono">${getResolvedAmount(selectedPayer!)}</div>
+                    <div className="text-blue-600 text-xs mt-1 mono">PayNow: +65 XXXX XXXX</div>
+                  </div>
+                </div>
+              )}
+              <div className="text-center mt-3">
+                <div className="text-blue-900 font-bold text-lg mono">${getResolvedAmount(selectedPayer!)}</div>
+              </div>
+            </div>
+            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30">
+              <p className="text-blue-200 text-sm mb-3"><strong className="text-white">Next steps for @{selectedPayer}:</strong></p>
+              <ol className="text-blue-200 text-sm space-y-2 list-decimal list-inside">
+                <li>Save this QR code image</li>
+                <li>Open PayNow/PayLah app</li>
+                <li>Scan the QR code and pay</li>
+                <li>Take a screenshot of payment confirmation</li>
+                <li>Upload screenshot to verify payment</li>
+              </ol>
+            </div>
+            <button onClick={() => fileInputRef.current?.click()} disabled={uploadingScreenshot} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between mb-3">
+              {uploadingScreenshot ? (
+                <><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div><span>Uploading...</span></>
+              ) : (
+                <><span>Upload Payment Screenshot</span><Camera size={20} /></>
+              )}
+            </button>
+            <button onClick={() => setStep('overview')} className="w-full text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back to Overview</button>
+          </div>
+        )}
+
+        {/* Payment Verification */}
+        {step === 'verify-payment' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-2">Verify Payment</h2>
+            <p className="text-blue-200 text-sm mb-6">Payment screenshot from @{selectedPayer}</p>
+            <div className="bg-white rounded-2xl p-4 mb-6">
+              <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-xl p-6">
+                <div className="text-center mb-4"><CheckCircle className="text-green-600 mx-auto mb-2" size={48} /><h3 className="text-green-900 font-bold text-lg mb-1">Screenshot Uploaded</h3><p className="text-green-700 text-xs">Ready for verification</p></div>
+                <div className="bg-white/50 rounded-lg p-4 space-y-2 text-sm">
+                  <div className="flex justify-between"><span className="text-gray-600">To:</span><span className="text-gray-900 font-semibold mono">@{currentUser}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-600">Amount:</span><span className="text-green-600 font-bold mono">${getResolvedAmount(selectedPayer!)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-600">Date:</span><span className="text-gray-900 mono text-xs">{new Date().toLocaleDateString('en-SG', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span></div>
+                </div>
+              </div>
+            </div>
+            <div className="bg-yellow-500/10 rounded-xl p-4 mb-6 border border-yellow-400/30"><p className="text-yellow-200 text-sm"><strong className="text-yellow-100">Verifying payment details...</strong><br />Checking amount, recipient, and timestamp</p></div>
+            <button onClick={handlePaymentVerification} disabled={verifyingPayment} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50">
+              {verifyingPayment ? (<><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div><span>Verifying...</span></>) : (<><CheckCircle size={20} /><span>Confirm Payment Verification</span></>)}
+            </button>
+            <button onClick={() => setStep('qr-display')} className="w-full mt-3 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back to QR Code</button>
+          </div>
+        )}
+
+        {/* Payment Confirmed */}
+        {step === 'payment-confirmed' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="text-center mb-6">
+              <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center"><CheckCircle className="text-white" size={48} /></div>
+              <h2 className="text-white text-2xl font-bold mb-2">Payment Verified!</h2>
+              <p className="text-green-200 text-sm">@{selectedPayer} has successfully paid</p>
+            </div>
+            <div className="bg-green-500/10 rounded-xl p-6 mb-6 border border-green-400/30">
+              <div className="space-y-3">
+                <div className="flex justify-between items-center"><span className="text-green-200">Payer:</span><span className="text-white mono font-semibold">@{selectedPayer}</span></div>
+                <div className="flex justify-between items-center"><span className="text-green-200">Amount Paid:</span><span className="text-green-400 mono font-bold text-lg">${getResolvedAmount(selectedPayer!)}</span></div>
+                <div className="flex justify-between items-center"><span className="text-green-200">Status:</span><span className="text-green-400 font-semibold">Confirmed</span></div>
+              </div>
+            </div>
+            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">Payment recorded!</strong><br />The bot has updated @{selectedPayer}'s status to "Paid" and notified all participants.</p></div>
+            <button onClick={() => setStep('overview')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-center gap-2"><span>Back to Payment Overview</span><ArrowRight size={20} /></button>
+          </div>
+        )}
+
+        {/* Reminders */}
+        {step === 'reminder' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="flex items-center gap-4 mb-2">
+              <div className="relative">
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center">
+                  <Bell className="text-white animate-pulse" size={28} />
+                </div>
+                <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center">
+                  {participants.filter(p => p.trim() && paymentStatuses[p] !== 'paid').length}
+                </span>
+              </div>
+              <div>
+                <h2 className="text-white text-xl font-bold">Send Payment Reminders</h2>
+                <p className="text-orange-200 text-sm">Nudge unpaid participants via Telegram</p>
+              </div>
+            </div>
+            <div className="bg-gradient-to-r from-orange-500/10 to-red-500/10 rounded-xl p-4 mb-6 border border-orange-400/20">
+              <div className="text-white/60 text-xs font-semibold mb-2">MESSAGE PREVIEW</div>
+              <p className="text-white text-sm italic">
+                "Hey! Just a friendly reminder — you owe <span className="text-orange-300 mono font-semibold">${evenSplit ? calculateSplit() : '...'}</span> for the group bill of <span className="text-orange-300 mono font-semibold">${finalBillStr}</span>. Pay via the QR code link!"
+              </p>
+            </div>
+            <div className="space-y-3 mb-6">
+              {participants.filter(p => p.trim() && paymentStatuses[p] !== 'paid').map((participant, i) => {
+                const isSent = !!remindersSent[participant];
+                const isSending = sendingReminder === participant;
+                return (
+                  <div key={participant} className={`rounded-xl p-4 border transition-all duration-500 ${isSent ? 'bg-green-500/10 border-green-400/30' : 'bg-orange-500/10 border-orange-400/30 hover:bg-orange-500/15'}`} style={{ animation: `slideIn 0.4s ease-out ${i * 0.1}s both` }}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors duration-500 ${isSent ? 'bg-green-500/20' : 'bg-orange-500/20'}`}>
+                          {isSent ? <CheckCircle className="text-green-400" size={20} /> : <Clock className={`text-orange-400 ${!isSending ? 'animate-pulse' : ''}`} size={20} />}
+                        </div>
+                        <div>
+                          <div className="text-white mono text-sm">@{participant}</div>
+                          <div className={`text-xs font-semibold ${isSent ? 'text-green-300' : 'text-orange-300'}`}>
+                            {isSent ? `Sent at ${remindersSent[participant]}` : 'Waiting for payment'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-orange-400 mono text-sm font-bold">${getResolvedAmount(participant)}</span>
+                        <button onClick={() => handleSendReminder(participant)} disabled={isSent || isSending} className={`px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-all ${isSent ? 'bg-green-500/20 text-green-400 cursor-default' : isSending ? 'btn-primary text-white opacity-70' : 'btn-primary text-white hover:-translate-y-0.5'}`}>
+                          {isSending ? (<><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>Sending</>) : isSent ? (<><CheckCircle size={14} />Sent</>) : (<><Bell size={14} />Remind</>)}
+                        </button>
+                      </div>
+                    </div>
+                    {isSent && (
+                      <div className="mt-3 pt-3 border-t border-green-400/20 animate-in">
+                        <div className="flex items-center gap-2 text-green-300 text-xs"><div className="w-1.5 h-1.5 rounded-full bg-green-400"></div>Notification delivered via Telegram</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setStep('overview')} className="flex-1 btn-secondary text-white px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+              {participants.filter(p => p.trim() && paymentStatuses[p] !== 'paid' && !remindersSent[p]).length > 0 && (
+                <button onClick={handleSendAllReminders} className="flex-1 bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-400 hover:to-red-400 text-white px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-orange-500/30"><Bell size={16} />Send All</button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Step Indicator */}
+      <div className="max-w-md mx-auto mt-6 text-center">
+        <div className="text-blue-300/50 text-xs mono">
+          {step === 'start' && 'START'}
+          {step === 'ocr-choice' && 'CHOOSE INPUT METHOD'}
+          {step === 'ocr-scan' && 'SCANNING RECEIPT'}
+          {step === 'ocr-result' && 'RECEIPT PROCESSED'}
+          {step === 'manual-bill' && 'ENTER BILL'}
+          {step === 'who-paid' && 'WHO PAID?'}
+          {step === 'participants' && 'ADD PARTICIPANTS'}
+          {step === 'split-type' && 'CHOOSE SPLIT TYPE'}
+          {step === 'custom-split' && 'CUSTOM SPLIT'}
+          {step === 'review-split' && 'REVIEW SPLIT'}
+          {step === 'overview' && 'PAYMENT STATUS'}
+          {step === 'qr-display' && 'QR CODE'}
+          {step === 'verify-payment' && 'VERIFYING PAYMENT'}
+          {step === 'payment-confirmed' && 'PAYMENT CONFIRMED'}
+          {step === 'reminder' && 'REMINDERS'}
+        </div>
+      </div>
+    </div>
+  );
+}
