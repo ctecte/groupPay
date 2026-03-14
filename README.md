@@ -121,7 +121,7 @@ Copy the generated HTTPS URL and set it as `WEBAPP_URL`.
 ### 6. Configure the bot with BotFather
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. `/mybots` → select your bot → **Bot Settings** → **Menu Button** → set the URL to your `WEBAPP_URL`
+2. `/mybots` → select your bot → **Bot Settings** → **Group Privacy** → turn off`
 3. Add the bot to a Telegram group chat
 
 ### 7. Run the bot
