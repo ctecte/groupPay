@@ -233,7 +233,7 @@ rm grouppay.db
 
 ## Tech Stack
 
-- **Bot**: Python, [pyTelegramBotAPI](https://github.com/eternnoir/pyTeleBot)
+- **Bot**: Python, [pyTelegramBotAPI](https://pypi.org/project/pyTelegramBotAPI/)
 - **API**: Flask, flask-cors
 - **Database**: SQLite
 - **QR**: qrcode + Pillow, EMVCo PayNow format
