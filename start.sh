@@ -47,11 +47,20 @@ fi
 export WEBAPP_URL
 echo "🌐 Tunnel URL: $WEBAPP_URL"
 
-# Start bot
-nohup python bot.py > bot.log 2>&1 &
+# Start bot with WEBAPP_URL passed explicitly
+WEBAPP_URL="$WEBAPP_URL" nohup python bot.py > bot.log 2>&1 &
 sleep 2
 
-echo "✅ Bot PID: $(pgrep -f 'python bot.py')"
+# Verify
+BOT_PID=$(pgrep -f 'python bot.py')
+if [ -z "$BOT_PID" ]; then
+    echo "❌ Bot failed to start. Check bot.log"
+    exit 1
+fi
+
+echo ""
+echo "✅ Bot PID: $BOT_PID"
 echo "🌐 $WEBAPP_URL"
 echo ""
-echo "⚠️  Update BotFather Menu Button URL if tunnel URL changed."
+echo "To check status:  tail -f bot.log"
+echo "To stop:          kill $BOT_PID"
