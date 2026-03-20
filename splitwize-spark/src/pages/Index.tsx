@@ -1209,45 +1209,64 @@ export default function GroupPayPrototype() {
             {overviewTab === 'status' && (
               <>
                 <div className="space-y-3 mb-4">
-                  {otherParticipants.map((participant) => (
-                    <div key={participant} className={`rounded-xl p-4 flex items-center justify-between border transition-all ${paymentStatuses[participant] === 'paid' ? 'bg-green-500/5 border-green-500/20' : 'bg-white/5 border-white/10'}`}>
+                  {otherParticipants.map((participant) => {
+                    const status = paymentStatuses[participant];
+                    const isViewerPayee = isPayerParticipant(currentUser);
+                    return (
+                    <div key={participant} className={`rounded-xl p-4 flex items-center justify-between border transition-all ${status === 'paid' ? 'bg-green-500/5 border-green-500/20' : status === 'self-confirmed' ? 'bg-amber-500/5 border-amber-500/20' : 'bg-white/5 border-white/10'}`}>
                       <div className="flex items-center gap-3">
-                        <button
-                          onClick={async () => {
-                            if (paymentStatuses[participant] !== 'paid') {
-                              if (sessionId) {
-                                try { await updatePaymentStatus(sessionId, participant, 'paid'); } catch {}
+                        {isViewerPayee ? (
+                          <button
+                            onClick={async () => {
+                              if (status !== 'paid') {
+                                if (sessionId) {
+                                  try { await updatePaymentStatus(sessionId, participant, 'paid'); } catch {}
+                                }
+                                confirmPayment(participant);
                               }
-                              confirmPayment(participant);
-                            }
-                          }}
-                          className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shrink-0 ${
-                            paymentStatuses[participant] === 'paid'
-                              ? 'bg-green-500 border-green-400'
-                              : 'border-white/30 hover:border-blue-400'
-                          }`}
-                        >
-                          {paymentStatuses[participant] === 'paid' && <CheckCircle className="text-white" size={14} />}
-                        </button>
+                            }}
+                            className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shrink-0 ${
+                              status === 'paid'
+                                ? 'bg-green-500 border-green-400'
+                                : status === 'self-confirmed'
+                                  ? 'bg-amber-500 border-amber-400 animate-pulse'
+                                  : 'border-white/30 hover:border-blue-400'
+                            }`}
+                          >
+                            {status === 'paid' && <CheckCircle className="text-white" size={14} />}
+                            {status === 'self-confirmed' && <Clock className="text-white" size={14} />}
+                          </button>
+                        ) : (
+                          <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center shrink-0 ${
+                            status === 'paid' ? 'bg-green-500 border-green-400' : status === 'self-confirmed' ? 'bg-amber-500 border-amber-400' : 'border-white/20'
+                          }`}>
+                            {status === 'paid' && <CheckCircle className="text-white" size={14} />}
+                            {status === 'self-confirmed' && <Clock className="text-white" size={14} />}
+                          </div>
+                        )}
                         <div>
                           <div className="text-white mono text-sm">@{participant}</div>
-                          <div className={`mono text-xs font-semibold ${paymentStatuses[participant] === 'paid' ? 'text-green-400' : 'text-white/50'}`}>
+                          <div className={`mono text-xs font-semibold ${status === 'paid' ? 'text-green-400' : status === 'self-confirmed' ? 'text-amber-400' : 'text-white/50'}`}>
                             ${getResolvedAmount(participant)}
+                            {status === 'self-confirmed' && <span className="ml-1 text-[10px]">— says paid</span>}
                           </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        {paymentStatuses[participant] === 'paid' ? (
+                        {status === 'paid' ? (
                           <span className="text-green-400 text-xs font-semibold flex items-center gap-1"><CheckCircle size={14} />Verified</span>
+                        ) : status === 'self-confirmed' ? (
+                          <span className="text-amber-400 text-xs font-semibold flex items-center gap-1"><Clock size={14} />Pending</span>
                         ) : (
                           <button onClick={() => generateQR(participant)} className="btn-primary text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5"><QrCode size={14} />QR</button>
                         )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
-                {!allPaid() && (
+                {!allPaid() && isPayerParticipant(currentUser) && (
                   <div className="space-y-2 mb-4">
                     {totalParticipants - paidCount > 1 && (
                       <button onClick={markAllAsPaid} className="w-full bg-green-500/10 hover:bg-green-500/20 border border-green-400/30 text-green-300 px-4 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all">

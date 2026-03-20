@@ -234,6 +234,35 @@ def api_remind(session_id):
     return jsonify({"ok": True, "reminded": [p["name"] for p in unpaid]})
 
 
+@app.route("/api/sessions/<session_id>/participants/<name>/self-confirm", methods=["POST"])
+def api_self_confirm(session_id, name):
+    """Participant confirms their own payment. Only allowed if they've read the whisper."""
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    participant = next((p for p in session["participants"] if p["name"] == name), None)
+    if not participant:
+        return jsonify({"error": "Participant not found"}), 404
+    if not participant.get("whisper_read"):
+        return jsonify({"error": "You must view your QR code first"}), 403
+    db.update_participant_status(session_id, name, "self-confirmed")
+    # Notify group chat
+    chat_id = session.get("chat_id")
+    if chat_id:
+        try:
+            cid = int(chat_id)
+            p_mention = _mention(name, participant.get("telegram_id"), cid)
+            bot.send_message(
+                cid,
+                f"💸 {p_mention} says they've paid <b>${participant['amount']}</b>.\n"
+                f"Awaiting confirmation from {_mention(session['payee'], chat_id=cid)}.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(f"[BOT ERROR] Self-confirm notify failed: {e}")
+    return jsonify({"ok": True, "status": "self-confirmed"})
+
+
 @app.route("/api/sessions/<session_id>/qr/<name>", methods=["GET"])
 def api_qr(session_id, name):
     session = db.get_session(session_id)
@@ -312,6 +341,10 @@ def api_pay_page(session_id, name):
   .btn-primary:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(59,130,246,0.4); }}
   .btn-secondary {{ background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); }}
   .btn-secondary:hover {{ background: rgba(255,255,255,0.15); }}
+  .btn-confirm {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; }}
+  .btn-confirm:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(34,197,94,0.4); }}
+  .btn-confirm:disabled {{ transform: none; box-shadow: none; }}
+  .btn-pending {{ background: linear-gradient(135deg, #f59e0b, #d97706); }}
   .event {{ color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 16px; }}
 </style>
 </head>
@@ -329,8 +362,33 @@ def api_pay_page(session_id, name):
     <div class="row"><span class="label">Event</span><span class="value">{session['event_name']}</span></div>
   </div>
   <a href="{qr_img_url}" download="{filename}" class="btn btn-primary">📥 Download QR Image</a>
+  <button id="confirm-btn" class="btn btn-confirm" onclick="confirmPayment()" {'' if participant.get('whisper_read') else 'disabled style="opacity:0.4;cursor:not-allowed"'}>
+    {('✅ Payment Confirmed' if participant['status'] == 'paid' else '⏳ Awaiting Payee Confirmation' if participant['status'] == 'self-confirmed' else "✅ I've Paid")}
+  </button>
   <div class="event">GroupPay — {session['event_name']}</div>
 </div>
+<script>
+async function confirmPayment() {{
+  const btn = document.getElementById('confirm-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = 'Confirming...';
+  try {{
+    const res = await fetch('/api/sessions/{session_id}/participants/{quote(name)}/self-confirm', {{method: 'POST'}});
+    const data = await res.json();
+    if (res.ok) {{
+      btn.textContent = '⏳ Awaiting Payee Confirmation';
+      btn.classList.add('btn-pending');
+    }} else {{
+      btn.textContent = data.error || 'Error';
+      btn.disabled = false;
+    }}
+  }} catch {{
+    btn.textContent = 'Error — try again';
+    btn.disabled = false;
+  }}
+}}
+</script>
 </body>
 </html>"""
 
@@ -420,6 +478,9 @@ def handle_qr_whisper(call):
     phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
 
     bot.answer_callback_query(call.id, "🔓 QR code unlocked!")
+
+    # Mark whisper as read
+    db.mark_whisper_read(session_id, target_name)
 
     # Replace button with payment details + QR page link
     qr_page_url = f"{WEBAPP_URL}/api/sessions/{session_id}/pay/{quote(target_name)}"

@@ -37,6 +37,7 @@ def init_db():
             telegram_id TEXT,
             amount TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            whisper_read INTEGER NOT NULL DEFAULT 0,
             screenshot_path TEXT,
             UNIQUE(session_id, name)
         );
@@ -76,7 +77,7 @@ def get_session(session_id: str) -> dict | None:
     session = dict(row)
     session["even_split"] = bool(session["even_split"])
     parts = conn.execute(
-        "SELECT name, telegram_id, amount, status, screenshot_path FROM participants WHERE session_id=?",
+        "SELECT name, telegram_id, amount, status, whisper_read, screenshot_path FROM participants WHERE session_id=?",
         (session_id,),
     ).fetchall()
     session["participants"] = [dict(p) for p in parts]
@@ -89,6 +90,18 @@ def update_participant_status(session_id: str, name: str, status: str) -> bool:
     cur = conn.execute(
         "UPDATE participants SET status=? WHERE session_id=? AND name=?",
         (status, session_id, name),
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def mark_whisper_read(session_id: str, name: str) -> bool:
+    conn = _connect()
+    cur = conn.execute(
+        "UPDATE participants SET whisper_read=1 WHERE session_id=? AND name=?",
+        (session_id, name),
     )
     conn.commit()
     ok = cur.rowcount > 0
