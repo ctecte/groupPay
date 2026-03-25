@@ -79,6 +79,21 @@ export async function sendReminders(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to send reminders: ${res.statusText}`);
 }
 
+export async function scanReceipt(file: File): Promise<{
+  items?: { name: string; price: number; qty: number }[];
+  total?: number;
+  error?: string;
+}> {
+  const formData = new FormData();
+  formData.append('receipt', file);
+  const res = await fetch(`${API_BASE}/ocr`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`OCR failed: ${res.statusText}`);
+  return res.json();
+}
+
 export function qrUrl(sessionId: string, participantName: string): string {
   return `${API_BASE}/sessions/${sessionId}/qr/${encodeURIComponent(participantName)}`;
 }

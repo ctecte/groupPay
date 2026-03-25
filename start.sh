@@ -21,8 +21,11 @@ cd splitwize-spark && npx vite build 2>&1 | tail -1 && cd ..
 if [ "$TUNNEL" = "cloudflare" ]; then
     echo "🌐 Starting Cloudflare Tunnel..."
     nohup cloudflared tunnel --url http://localhost:5000 > cloudflared.log 2>&1 &
-    sleep 5
-    WEBAPP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1)
+    for i in $(seq 1 15); do
+        WEBAPP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1)
+        [ -n "$WEBAPP_URL" ] && break
+        sleep 2
+    done
     if [ -z "$WEBAPP_URL" ]; then
         echo "❌ Cloudflare tunnel failed to start. Check cloudflared.log"
         exit 1

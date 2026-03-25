@@ -21,7 +21,7 @@ import db
 from paynow_qr import generate_paynow_qr_data
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8061320633:AAEFegJpAs281zT4ySk20z2o_SHzh9tg3Rw")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://subfossorial-ritualistically-christene.ngrok-free.dev")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -232,6 +232,37 @@ def api_remind(session_id):
         except Exception as e:
             print(f"[BOT ERROR] Reminder failed: {e}")
     return jsonify({"ok": True, "reminded": [p["name"] for p in unpaid]})
+
+
+@app.route("/api/ocr", methods=["POST"])
+def api_ocr():
+    """Process a receipt image with PaddleOCR and return extracted items."""
+    if "receipt" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    f = request.files["receipt"]
+    f.save(os.path.join(UPLOAD_DIR, "ocr_debug.jpg"))
+    f.seek(0)
+    image_bytes = f.read()
+    print(f"[OCR] Received image: {len(image_bytes)} bytes")
+
+    if len(image_bytes) > 10 * 1024 * 1024:
+        return jsonify({"error": "Image too large (max 10MB)"}), 400
+
+    try:
+        from ocr import run_ocr
+        items = run_ocr(image_bytes)
+    except Exception as e:
+        import traceback
+        print(f"[OCR ERROR] {e}")
+        traceback.print_exc()
+        return jsonify({"error": "OCR processing failed. Please try again."}), 500
+
+    if not items:
+        return jsonify({"error": "No items found on receipt. Try a clearer photo."})
+
+    total = sum(item["price"] * item["qty"] for item in items)
+    return jsonify({"items": items, "total": round(total, 2)})
 
 
 @app.route("/api/sessions/<session_id>/participants/<name>/self-confirm", methods=["POST"])

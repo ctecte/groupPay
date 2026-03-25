@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell } from 'lucide-react';
-import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl } from '@/lib/api';
+import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt } from '@/lib/api';
 
 export default function GroupPayPrototype() {
   const [step, setStep] = useState('start');
@@ -16,6 +16,9 @@ export default function GroupPayPrototype() {
   const [eventName, setEventName] = useState('dinner');
   const [ocrScanning, setOcrScanning] = useState(false);
   const [ocrItems, setOcrItems] = useState<{ name: string; price: number; qty: number }[]>([]);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
   const [screenshotUploaded, setScreenshotUploaded] = useState(false);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
@@ -199,25 +202,34 @@ export default function GroupPayPrototype() {
   const settlementPct = totalParticipants > 0 ? (paidCount / totalParticipants) * 100 : 0;
   const leftToPayPct = 100 - settlementPct;
 
-  const handleOCRScan = () => {
+  const handleOCRScan = async (file: File) => {
     setOcrScanning(true);
-    setTimeout(() => {
-      const mockReceiptItems = [
-        { name: 'Grilled Chicken Pasta', price: 24.50, qty: 2 },
-        { name: 'Caesar Salad', price: 12.00, qty: 1 },
-        { name: 'Beef Burger', price: 18.50, qty: 1 },
-        { name: 'Truffle Fries', price: 15.00, qty: 2 },
-        { name: 'Iced Latte', price: 6.50, qty: 3 },
-        { name: 'Lemonade', price: 5.00, qty: 1 },
-        { name: 'Service Charge (10%)', price: 12.15, qty: 1 },
-        { name: 'GST (9%)', price: 11.85, qty: 1 }
-      ];
-      const total = mockReceiptItems.reduce((sum, item) => sum + (item.price * item.qty), 0);
-      setOcrItems(mockReceiptItems);
-      setBillAmount(total.toFixed(2));
+    setOcrError(null);
+    try {
+      const result = await scanReceipt(file);
+      console.log('[OCR] Raw response:', JSON.stringify(result));
+      alert(`OCR got ${result.items?.length ?? 0} items, total: ${result.total}, error: ${result.error || 'none'}`);
+      if (result.error || !result.items?.length) {
+        setOcrError(result.error || 'No items detected. Try a clearer photo.');
+        setOcrScanning(false);
+        return;
+      }
+      setOcrItems(result.items);
+      setBillAmount((result.total ?? 0).toFixed(2));
       setOcrScanning(false);
       setStep('ocr-result');
-    }, 2000);
+    } catch (e) {
+      console.error('[OCR] Error:', e);
+      alert(`OCR error: ${e}`);
+      setOcrError('Failed to process receipt. Please try again.');
+      setOcrScanning(false);
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleOCRScan(file);
+    e.target.value = '';
   };
 
   const handleScreenshotUpload = async (file: File) => {
@@ -496,13 +508,21 @@ export default function GroupPayPrototype() {
         {step === 'ocr-scan' && (
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Scan Your Receipt</h2>
-            <p className="text-blue-200 text-sm mb-6">Position receipt within the frame</p>
+            <p className="text-blue-200 text-sm mb-6">Take a photo or upload an image of your receipt</p>
+            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+            <input ref={galleryInputRef} type="file" accept="image/*" onChange={handleFileSelect} className="hidden" />
             <div className="relative bg-black/40 rounded-2xl p-4 mb-6 aspect-[3/4] flex items-center justify-center border-2 border-dashed border-blue-400/50">
               {!ocrScanning ? (
                 <div className="text-center">
                   <Camera className="text-blue-400 mx-auto mb-4" size={64} />
                   <p className="text-white/70 text-sm mb-6">Ready to scan</p>
-                  <button onClick={handleOCRScan} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold">Capture Receipt</button>
+                  <button onClick={() => cameraInputRef.current?.click()} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold mb-3 w-full">📷 Capture Receipt</button>
+                  <button onClick={() => galleryInputRef.current?.click()} className="btn-secondary text-white px-8 py-3 rounded-xl font-semibold w-full border border-white/20">📁 Upload from Gallery</button>
+                  {ocrError && (
+                    <div className="mt-4 bg-red-500/10 rounded-xl p-3 border border-red-400/30">
+                      <p className="text-red-200 text-sm">{ocrError}</p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center">
