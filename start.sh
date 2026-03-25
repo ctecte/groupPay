@@ -51,7 +51,7 @@ export WEBAPP_URL
 echo "🌐 Tunnel URL: $WEBAPP_URL"
 
 # Start bot with WEBAPP_URL passed explicitly
-WEBAPP_URL="$WEBAPP_URL" nohup python bot.py > bot.log 2>&1 &
+WEBAPP_URL="$WEBAPP_URL" nohup python -u bot.py > bot.log 2>&1 &
 sleep 2
 
 # Verify

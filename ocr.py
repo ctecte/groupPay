@@ -259,32 +259,52 @@ def parse_receipt_lines(lines):
     return items
 
 
-def run_ocr(image_bytes):
-    """
-    Run OCR on receipt image bytes.
-    Returns list of {"name": str, "price": float, "qty": int}.
-    """
-    # Fix EXIF orientation
-    img = Image.open(io.BytesIO(image_bytes))
-    img = ImageOps.exif_transpose(img)
-    img = img.convert('RGB')
-
-    # Save to temp file for PaddleOCR
+def _ocr_image(img):
+    """Run OCR on a PIL Image and return (parsed_items, lines)."""
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
         img.save(tmp, format='JPEG', quality=95)
         tmp_path = tmp.name
 
     future = _get_pool().submit(_ocr_in_subprocess, tmp_path)
     results = future.result(timeout=60)
-
     os.unlink(tmp_path)
 
     if not results or not results[0]:
-        return []
+        return [], []
 
     lines = _group_by_y(results)
     lines = _merge_split_lines(lines)
-    all_items = parse_receipt_lines(lines)
+    return parse_receipt_lines(lines), lines
+
+
+def run_ocr(image_bytes):
+    """
+    Run OCR on receipt image bytes.
+    Returns dict with items, charges, charges_included.
+    Tries original orientation and 90° rotation, picks the best result.
+    """
+    # Fix EXIF orientation
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert('RGB')
+
+    # Try original orientation
+    all_items, all_lines = _ocr_image(img)
+    food_count = sum(1 for i in all_items if not i['is_charge'])
+
+    # If landscape image and few items found, try 90° rotations
+    w, h = img.size
+    if w > h and food_count < 3:
+        print(f"[OCR] Landscape image with only {food_count} food items — trying rotations")
+        for angle in [270, 90]:
+            rotated = img.rotate(angle, expand=True)
+            rotated_items, rotated_lines = _ocr_image(rotated)
+            rotated_food = sum(1 for i in rotated_items if not i['is_charge'])
+            print(f"[OCR] Rotation {angle}°: {rotated_food} food items")
+            if rotated_food > food_count:
+                all_items = rotated_items
+                all_lines = rotated_lines
+                food_count = rotated_food
 
     food_items = [{'name': i['name'], 'price': i['price'], 'qty': i['qty']}
                   for i in all_items if not i['is_charge']]
@@ -292,8 +312,7 @@ def run_ocr(image_bytes):
                for i in all_items if i['is_charge']]
 
     # Detect if charges are already included in menu prices.
-    # Extract grand total from the lines we skipped earlier.
-    grand_total = _extract_grand_total(lines)
+    grand_total = _extract_grand_total(all_lines)
     food_subtotal = sum(i['price'] * i['qty'] for i in food_items)
     charges_total = sum(c['price'] for c in charges)
 
