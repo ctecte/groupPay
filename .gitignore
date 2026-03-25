@@ -14,3 +14,7 @@ group_members.json
 test_paynow_qr.png
 bun.lock
 bun.lockb
+cloudflared.log
+claude.txt
+context.md
+*.jpg
