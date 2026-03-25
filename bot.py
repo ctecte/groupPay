@@ -251,18 +251,28 @@ def api_ocr():
 
     try:
         from ocr import run_ocr
-        items = run_ocr(image_bytes)
+        result = run_ocr(image_bytes)
     except Exception as e:
         import traceback
         print(f"[OCR ERROR] {e}")
         traceback.print_exc()
         return jsonify({"error": "OCR processing failed. Please try again."}), 500
 
+    items = result.get("items", [])
+    charges = result.get("charges", [])
+
     if not items:
         return jsonify({"error": "No items found on receipt. Try a clearer photo."})
 
-    total = sum(item["price"] * item["qty"] for item in items)
-    return jsonify({"items": items, "total": round(total, 2)})
+    subtotal = sum(item["price"] * item["qty"] for item in items)
+    charges_total = sum(c["price"] for c in charges)
+    total = subtotal + charges_total
+    return jsonify({
+        "items": items,
+        "charges": charges,
+        "subtotal": round(subtotal, 2),
+        "total": round(total, 2),
+    })
 
 
 @app.route("/api/sessions/<session_id>/participants/<name>/self-confirm", methods=["POST"])

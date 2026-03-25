@@ -16,6 +16,9 @@ export default function GroupPayPrototype() {
   const [eventName, setEventName] = useState('dinner');
   const [ocrScanning, setOcrScanning] = useState(false);
   const [ocrItems, setOcrItems] = useState<{ name: string; price: number; qty: number }[]>([]);
+  const [ocrCharges, setOcrCharges] = useState<{ name: string; price: number }[]>([]);
+  const [ocrSubtotal, setOcrSubtotal] = useState(0);
+  const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrError, setOcrError] = useState<string | null>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
@@ -52,6 +55,8 @@ export default function GroupPayPrototype() {
   const [splitMethod, setSplitMethod] = useState<'amount' | 'percentage' | 'shares'>('amount');
   const [customPercentages, setCustomPercentages] = useState<Record<string, string>>({});
   const [customShares, setCustomShares] = useState<Record<string, string>>({});
+  const [menuPriceMode, setMenuPriceMode] = useState(true);
+  const [customItemLines, setCustomItemLines] = useState<Record<string, string[]>>({});
 
   // Telegram state
   const [isTMA, setIsTMA] = useState(false);
@@ -168,6 +173,14 @@ export default function GroupPayPrototype() {
   const finalBillAmount = billType === 'subtotal' ? baseAfterSC + gstAmount : subtotalAmount;
   const finalBillStr = finalBillAmount.toFixed(2);
   const hasGstCharges = billType === 'subtotal' && (serviceChargeOn || gstOn);
+  const ppMultiplier = subtotalAmount > 0 ? finalBillAmount / subtotalAmount : 1;
+  const useMenuPriceMode = menuPriceMode && hasGstCharges && splitMethod === 'amount';
+
+  // Sum item lines for a person (menu prices)
+  const getItemLinesSum = (person: string) => {
+    const lines = customItemLines[person] || [''];
+    return lines.reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
+  };
 
   const calculateSplitAmount = () => {
     const total = otherParticipants.length + 1;
@@ -191,6 +204,10 @@ export default function GroupPayPrototype() {
     if (evenSplit) return calculateSplitAmount();
     if (splitMethod === 'percentage') return getAmountFromPercentage(person);
     if (splitMethod === 'shares') return getAmountFromShares(person);
+    if (useMenuPriceMode) {
+      const menuTotal = getItemLinesSum(person);
+      return (menuTotal * ppMultiplier).toFixed(2);
+    }
     return customAmounts[person] || '0.00';
   };
 
@@ -207,15 +224,16 @@ export default function GroupPayPrototype() {
     setOcrError(null);
     try {
       const result = await scanReceipt(file);
-      console.log('[OCR] Raw response:', JSON.stringify(result));
-      alert(`OCR got ${result.items?.length ?? 0} items, total: ${result.total}, error: ${result.error || 'none'}`);
       if (result.error || !result.items?.length) {
         setOcrError(result.error || 'No items detected. Try a clearer photo.');
         setOcrScanning(false);
         return;
       }
       setOcrItems(result.items);
+      setOcrCharges(result.charges ?? []);
+      setOcrSubtotal(result.subtotal ?? 0);
       setBillAmount((result.total ?? 0).toFixed(2));
+      setItemAssignments({});
       setOcrScanning(false);
       setStep('ocr-result');
     } catch (e) {
@@ -543,15 +561,25 @@ export default function GroupPayPrototype() {
             <div className="bg-white/5 rounded-xl p-4 mb-6 max-h-96 overflow-y-auto">
               <div className="space-y-2">
                 {ocrItems.map((item, index) => (
-                  <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 2 ? 'border-b border-white/10' : ''}`}>
+                  <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 1 || ocrCharges.length > 0 ? 'border-b border-white/10' : ''}`}>
                     <div className="flex-1"><div className="text-white text-sm">{item.name}</div>{item.qty > 1 && <div className="text-white/50 text-xs mono">Qty: {item.qty}</div>}</div>
                     <div className="text-green-400 mono font-semibold">${(item.price * item.qty).toFixed(2)}</div>
                   </div>
                 ))}
+                {ocrCharges.length > 0 && (
+                  <div className="pt-2">
+                    {ocrCharges.map((charge, index) => (
+                      <div key={`charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
+                        <div className="text-white/50 text-sm">{charge.name}</div>
+                        <div className="text-amber-400 mono font-semibold">${charge.price.toFixed(2)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${billAmount}</span></div>
             </div>
-            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />We found {ocrItems.length} items totaling ${billAmount}</p></div>
+            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items + {ocrCharges.length} charges = ${billAmount}</p></div>
             <button onClick={() => setStep('who-paid')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><span>Continue</span><ArrowRight size={20} /></button>
             <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
           </div>
@@ -909,10 +937,154 @@ export default function GroupPayPrototype() {
             </div>
 
             <button onClick={addParticipant} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold mb-4">+ Add Another Person</button>
-            <button onClick={() => setStep('split-type')} disabled={participants.filter(p => p.trim()).length === 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"><span>Continue</span><ArrowRight size={20} /></button>
+            <button onClick={() => setStep(ocrItems.length > 0 ? 'item-assign' : 'split-type')} disabled={participants.filter(p => p.trim()).length === 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"><span>{ocrItems.length > 0 ? 'Assign Items' : 'Continue'}</span><ArrowRight size={20} /></button>
             <button onClick={() => setStep('who-paid')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
           </div>
         )}
+
+        {/* Item Assignment (receipt scan only) */}
+        {step === 'item-assign' && (() => {
+          const allPeople = [currentUser, ...otherParticipants];
+          const totalCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
+          const assignedCount = ocrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
+          const allAssigned = assignedCount === ocrItems.length;
+
+          // Calculate per-person totals
+          const personFoodTotals: Record<string, number> = {};
+          allPeople.forEach(p => { personFoodTotals[p] = 0; });
+          ocrItems.forEach((item, idx) => {
+            const assignees = itemAssignments[idx] || [];
+            if (assignees.length === 0) return;
+            const perPerson = (item.price * item.qty) / assignees.length;
+            assignees.forEach(name => {
+              personFoodTotals[name] = (personFoodTotals[name] || 0) + perPerson;
+            });
+          });
+
+          const personFinalTotals: Record<string, number> = {};
+          allPeople.forEach(name => {
+            const ratio = ocrSubtotal > 0 ? personFoodTotals[name] / ocrSubtotal : 0;
+            personFinalTotals[name] = personFoodTotals[name] + ratio * totalCharges;
+          });
+
+          const toggleAssignment = (itemIdx: number, person: string) => {
+            setItemAssignments(prev => {
+              const current = prev[itemIdx] || [];
+              const next = current.includes(person)
+                ? current.filter(p => p !== person)
+                : [...current, person];
+              return { ...prev, [itemIdx]: next };
+            });
+          };
+
+          const assignAllToItem = (itemIdx: number) => {
+            setItemAssignments(prev => ({ ...prev, [itemIdx]: [...allPeople] }));
+          };
+
+          const handleContinue = () => {
+            const amounts: Record<string, string> = {};
+            // Payee's share
+            amounts[currentUser] = personFinalTotals[currentUser].toFixed(2);
+            // Other participants
+            otherParticipants.forEach(name => {
+              amounts[name] = personFinalTotals[name].toFixed(2);
+            });
+            setCustomAmounts(amounts);
+            setEvenSplit(false);
+            setBillAmount(Object.values(personFinalTotals).reduce((s, v) => s + v, 0).toFixed(2));
+            setStep('review-split');
+          };
+
+          return (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-1">Assign Items</h2>
+            <p className="text-blue-200 text-sm mb-4">Tap people to assign each item. Shared items split evenly.</p>
+
+            <div className="text-white/40 text-xs mb-2 font-semibold uppercase tracking-wider">{assignedCount}/{ocrItems.length} items assigned</div>
+            <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mb-5">
+              <div className={`h-full rounded-full transition-all duration-300 ${allAssigned ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${ocrItems.length > 0 ? (assignedCount / ocrItems.length) * 100 : 0}%` }} />
+            </div>
+
+            <div className="space-y-4 mb-6 max-h-[50vh] overflow-y-auto">
+              {ocrItems.map((item, idx) => {
+                const assignees = itemAssignments[idx] || [];
+                const isAssigned = assignees.length > 0;
+                return (
+                  <div key={idx} className={`rounded-xl p-4 border transition-all ${isAssigned ? 'bg-green-500/5 border-green-400/30' : 'bg-white/5 border-white/10'}`}>
+                    <div className="flex justify-between items-start mb-3">
+                      <div className="flex-1">
+                        <div className="text-white text-sm font-medium">{item.name}</div>
+                        {item.qty > 1 && <div className="text-white/40 text-xs mono">Qty: {item.qty}</div>}
+                      </div>
+                      <div className="text-green-400 mono font-semibold text-sm">${(item.price * item.qty).toFixed(2)}</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {allPeople.map(person => {
+                        const isSelected = assignees.includes(person);
+                        return (
+                          <button
+                            key={person}
+                            onClick={() => toggleAssignment(idx, person)}
+                            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all border ${
+                              isSelected
+                                ? 'bg-blue-500/30 border-blue-400/60 text-blue-200'
+                                : 'bg-white/5 border-white/15 text-white/40 hover:border-white/30'
+                            }`}
+                          >
+                            {person}{isSelected && assignees.length > 1 ? ` · $${((item.price * item.qty) / assignees.length).toFixed(2)}` : ''}
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => assignAllToItem(idx)}
+                        className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 border border-white/15 text-white/30 hover:text-white/60 hover:border-white/30 transition-all"
+                      >
+                        All
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Per-person breakdown */}
+            <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
+              <div className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-3">Per Person Breakdown</div>
+              <div className="space-y-2">
+                {allPeople.map(person => {
+                  const food = personFoodTotals[person];
+                  const final_ = personFinalTotals[person];
+                  const charges = final_ - food;
+                  return (
+                    <div key={person} className="flex justify-between items-center py-1.5 border-b border-white/5 last:border-0">
+                      <div>
+                        <div className="text-white text-sm font-medium">{person}{person === currentUser ? ' (payee)' : ''}</div>
+                        {charges > 0.005 && <div className="text-white/40 text-[10px] mono">${food.toFixed(2)} + ${charges.toFixed(2)} charges</div>}
+                      </div>
+                      <div className={`mono font-bold text-sm ${final_ > 0 ? 'text-green-400' : 'text-white/30'}`}>
+                        ${final_.toFixed(2)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-3 pt-3 border-t-2 border-white/20 flex justify-between items-center">
+                <span className="text-white font-bold text-sm">TOTAL</span>
+                <span className="text-green-400 mono font-bold">${Object.values(personFinalTotals).reduce((s, v) => s + v, 0).toFixed(2)}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleContinue}
+              disabled={!allAssigned}
+              className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span>Confirm Split</span><ArrowRight size={20} />
+            </button>
+            <button onClick={() => setStep('participants')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+          );
+        })()}
 
         {/* Split Type */}
         {step === 'split-type' && (
@@ -954,6 +1126,7 @@ export default function GroupPayPrototype() {
         {/* Custom Split */}
         {step === 'custom-split' && (() => {
           const total = finalBillAmount;
+          const tallyTarget = useMenuPriceMode ? subtotalAmount : finalBillAmount;
           const allKeys = [currentUser, ...otherParticipants];
 
           let assigned = 0;
@@ -962,9 +1135,13 @@ export default function GroupPayPrototype() {
           let isValid = false;
 
           if (splitMethod === 'amount') {
-            assigned = allKeys.reduce((sum, k) => sum + (parseFloat(customAmounts[k] || '') || 0), 0);
-            remaining = total - assigned;
-            pct = total > 0 ? Math.min((assigned / total) * 100, 100) : 0;
+            if (useMenuPriceMode) {
+              assigned = allKeys.reduce((sum, k) => sum + getItemLinesSum(k), 0);
+            } else {
+              assigned = allKeys.reduce((sum, k) => sum + (parseFloat(customAmounts[k] || '') || 0), 0);
+            }
+            remaining = tallyTarget - assigned;
+            pct = tallyTarget > 0 ? Math.min((assigned / tallyTarget) * 100, 100) : 0;
             isValid = Math.abs(remaining) < 0.01;
           } else if (splitMethod === 'percentage') {
             const totalPct = allKeys.reduce((sum, k) => sum + (parseFloat(customPercentages[k] || '') || 0), 0);
@@ -980,11 +1157,14 @@ export default function GroupPayPrototype() {
             remaining = 0;
           }
 
-          const tallyColor = isValid ? 'bg-green-500' : (splitMethod === 'amount' && assigned > total) || (splitMethod === 'percentage' && assigned > 100) ? 'bg-red-500' : 'bg-amber-500';
-          const tallyTextColor = isValid ? 'text-green-400' : (splitMethod === 'amount' && assigned > total) || (splitMethod === 'percentage' && assigned > 100) ? 'text-red-400' : 'text-amber-400';
+          const tallyColor = isValid ? 'bg-green-500' : (splitMethod === 'amount' && assigned > tallyTarget) || (splitMethod === 'percentage' && assigned > 100) ? 'bg-red-500' : 'bg-amber-500';
+          const tallyTextColor = isValid ? 'text-green-400' : (splitMethod === 'amount' && assigned > tallyTarget) || (splitMethod === 'percentage' && assigned > 100) ? 'text-red-400' : 'text-amber-400';
 
           const unfilledCount = allKeys.filter(k => {
-            if (splitMethod === 'amount') return !customAmounts[k] || parseFloat(customAmounts[k]) === 0;
+            if (splitMethod === 'amount') {
+              if (useMenuPriceMode) return getItemLinesSum(k) === 0;
+              return !customAmounts[k] || parseFloat(customAmounts[k]) === 0;
+            }
             if (splitMethod === 'percentage') return !customPercentages[k] || parseFloat(customPercentages[k]) === 0;
             return !customShares[k] || parseFloat(customShares[k]) === 0;
           }).length;
@@ -992,9 +1172,15 @@ export default function GroupPayPrototype() {
           return (
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">
-              {splitMethod === 'amount' ? 'Enter Custom Amounts' : splitMethod === 'percentage' ? 'Enter Percentages' : 'Enter Shares'}
+              {splitMethod === 'amount' ? (useMenuPriceMode ? 'Enter Menu Prices' : 'Enter Custom Amounts') : splitMethod === 'percentage' ? 'Enter Percentages' : 'Enter Shares'}
             </h2>
-            <p className="text-blue-200 text-sm mb-3">Total: <span className="mono font-bold text-white">${total.toFixed(2)}</span></p>
+            <p className="text-blue-200 text-sm mb-3">
+              {useMenuPriceMode ? (
+                <>Subtotal: <span className="mono font-bold text-white">${subtotalAmount.toFixed(2)}</span> <span className="text-white/40">→ Total: ${total.toFixed(2)}</span></>
+              ) : (
+                <>Total: <span className="mono font-bold text-white">${total.toFixed(2)}</span></>
+              )}
+            </p>
 
             <div className="flex gap-1 bg-white/5 rounded-xl p-1 mb-4 border border-white/10">
               {[
@@ -1016,11 +1202,25 @@ export default function GroupPayPrototype() {
               ))}
             </div>
 
+            {hasGstCharges && splitMethod === 'amount' && (
+              <button
+                onClick={() => setMenuPriceMode(!menuPriceMode)}
+                className={`w-full mb-4 flex items-center justify-between rounded-xl px-4 py-3 text-sm font-semibold transition-all border ${
+                  menuPriceMode
+                    ? 'bg-amber-500/15 border-amber-400/30 text-amber-300'
+                    : 'bg-white/5 border-white/10 text-white/50'
+                }`}
+              >
+                <span>{menuPriceMode ? 'Menu price mode (auto ++)' : 'Enter final amounts'}</span>
+                <span className="text-xs mono">{menuPriceMode ? 'ON' : 'OFF'}</span>
+              </button>
+            )}
+
             <div className="bg-white/5 rounded-xl p-4 mb-5 border border-white/10">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-white/70 text-sm">{splitMethod === 'shares' ? 'Total Shares' : 'Assigned'}</span>
                 <span className={`mono text-sm font-bold ${tallyTextColor}`}>
-                  {splitMethod === 'amount' ? `$${assigned.toFixed(2)} / $${total.toFixed(2)}` :
+                  {splitMethod === 'amount' ? `$${assigned.toFixed(2)} / $${tallyTarget.toFixed(2)}${useMenuPriceMode ? ' (menu)' : ''}` :
                    splitMethod === 'percentage' ? `${assigned.toFixed(1)}% / 100%` :
                    `${assigned} shares`}
                 </span>
@@ -1031,18 +1231,26 @@ export default function GroupPayPrototype() {
               <div className="flex justify-between items-center">
                 <span className={`text-xs font-semibold ${tallyTextColor}`}>
                   {isValid ? 'Perfectly balanced' :
-                   splitMethod === 'amount' ? (assigned > total ? `Over by $${(assigned - total).toFixed(2)}` : `$${remaining.toFixed(2)} remaining`) :
+                   splitMethod === 'amount' ? (assigned > tallyTarget ? `Over by $${(assigned - tallyTarget).toFixed(2)}` : `$${remaining.toFixed(2)} remaining`) :
                    splitMethod === 'percentage' ? (assigned > 100 ? `Over by ${(assigned - 100).toFixed(1)}%` : `${remaining.toFixed(1)}% remaining`) :
                    'Enter shares for each person'}
                 </span>
                 {splitMethod === 'amount' && remaining > 0.01 && unfilledCount > 0 && (
                   <button onClick={() => {
                     const perPerson = remaining / unfilledCount;
-                    const updated = { ...customAmounts };
-                    allKeys.forEach(k => {
-                      if (!updated[k] || parseFloat(updated[k]) === 0) updated[k] = perPerson.toFixed(2);
-                    });
-                    setCustomAmounts(updated);
+                    if (useMenuPriceMode) {
+                      const updated = { ...customItemLines };
+                      allKeys.forEach(k => {
+                        if (getItemLinesSum(k) === 0) updated[k] = [perPerson.toFixed(2)];
+                      });
+                      setCustomItemLines(updated);
+                    } else {
+                      const updated = { ...customAmounts };
+                      allKeys.forEach(k => {
+                        if (!updated[k] || parseFloat(updated[k]) === 0) updated[k] = perPerson.toFixed(2);
+                      });
+                      setCustomAmounts(updated);
+                    }
                   }} className="text-xs text-blue-300 hover:text-blue-200 underline transition">Split remaining evenly</button>
                 )}
                 {splitMethod === 'percentage' && remaining > 0.1 && unfilledCount > 0 && (
@@ -1062,31 +1270,83 @@ export default function GroupPayPrototype() {
               {allKeys.map((person) => {
                 const isPayee = person === currentUser;
                 const resolvedAmt = splitMethod === 'percentage' ? getAmountFromPercentage(person) : splitMethod === 'shares' ? getAmountFromShares(person) : (customAmounts[person] || '0.00');
+                const personLines = customItemLines[person] || [''];
+                const personMenuSum = getItemLinesSum(person);
+                const personFinal = (personMenuSum * ppMultiplier).toFixed(2);
                 return (
                   <div key={person} className={`rounded-xl p-4 ${isPayee ? 'bg-blue-500/10 border border-blue-400/20' : 'bg-white/5'}`}>
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-white mono text-sm">@{person} {isPayee && <span className="text-blue-300 text-xs">(Payee)</span>}</span>
-                      {splitMethod !== 'amount' && (
+                      {useMenuPriceMode ? (
+                        <span className="text-green-400 mono text-xs font-semibold">
+                          {personMenuSum > 0 ? `$${personMenuSum.toFixed(2)} → $${personFinal}` : ''}
+                        </span>
+                      ) : splitMethod !== 'amount' ? (
                         <span className="text-green-400 mono text-xs font-semibold">= ${resolvedAmt}</span>
-                      )}
+                      ) : null}
                     </div>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50 mono">
-                        {splitMethod === 'amount' ? '$' : splitMethod === 'percentage' ? '%' : '#'}
-                      </span>
-                      <input
-                        type="number"
-                        value={splitMethod === 'amount' ? (customAmounts[person] || '') : splitMethod === 'percentage' ? (customPercentages[person] || '') : (customShares[person] || '')}
-                        onChange={(e) => {
-                          if (splitMethod === 'amount') setCustomAmounts({ ...customAmounts, [person]: e.target.value });
-                          else if (splitMethod === 'percentage') setCustomPercentages({ ...customPercentages, [person]: e.target.value });
-                          else setCustomShares({ ...customShares, [person]: e.target.value });
-                        }}
-                        placeholder={splitMethod === 'amount' ? '0.00' : splitMethod === 'percentage' ? '0' : '1'}
-                        className="w-full bg-white/10 border border-white/20 rounded-lg pl-8 pr-4 py-2 text-white mono placeholder-white/30 focus:outline-none focus:border-blue-400"
-                        step={splitMethod === 'amount' ? '0.01' : '1'}
-                      />
-                    </div>
+
+                    {useMenuPriceMode ? (
+                      <div className="space-y-1.5">
+                        {personLines.map((lineVal, idx) => (
+                          <div key={idx} className="flex items-center gap-1.5">
+                            <div className="relative flex-1">
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50 mono">$</span>
+                              <input
+                                type="number"
+                                value={lineVal}
+                                onChange={(e) => {
+                                  const updated = [...personLines];
+                                  updated[idx] = e.target.value;
+                                  setCustomItemLines({ ...customItemLines, [person]: updated });
+                                }}
+                                placeholder="0.00"
+                                className="w-full bg-white/10 border border-white/20 rounded-lg pl-8 pr-4 py-2 text-white mono placeholder-white/30 focus:outline-none focus:border-blue-400 text-sm"
+                                step="0.01"
+                              />
+                            </div>
+                            {personLines.length > 1 && (
+                              <button
+                                onClick={() => {
+                                  const updated = personLines.filter((_, i) => i !== idx);
+                                  setCustomItemLines({ ...customItemLines, [person]: updated.length ? updated : [''] });
+                                }}
+                                className="text-white/30 hover:text-red-400 transition p-1"
+                              >
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => {
+                            setCustomItemLines({ ...customItemLines, [person]: [...personLines, ''] });
+                          }}
+                          className="text-xs text-blue-300 hover:text-blue-200 transition flex items-center gap-1 mt-1"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                          Add item
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/50 mono">
+                          {splitMethod === 'amount' ? '$' : splitMethod === 'percentage' ? '%' : '#'}
+                        </span>
+                        <input
+                          type="number"
+                          value={splitMethod === 'amount' ? (customAmounts[person] || '') : splitMethod === 'percentage' ? (customPercentages[person] || '') : (customShares[person] || '')}
+                          onChange={(e) => {
+                            if (splitMethod === 'amount') setCustomAmounts({ ...customAmounts, [person]: e.target.value });
+                            else if (splitMethod === 'percentage') setCustomPercentages({ ...customPercentages, [person]: e.target.value });
+                            else setCustomShares({ ...customShares, [person]: e.target.value });
+                          }}
+                          placeholder={splitMethod === 'amount' ? '0.00' : splitMethod === 'percentage' ? '0' : '1'}
+                          className="w-full bg-white/10 border border-white/20 rounded-lg pl-8 pr-4 py-2 text-white mono placeholder-white/30 focus:outline-none focus:border-blue-400"
+                          step={splitMethod === 'amount' ? '0.01' : '1'}
+                        />
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1546,6 +1806,7 @@ export default function GroupPayPrototype() {
           {step === 'manual-bill' && 'ENTER BILL'}
           {step === 'who-paid' && 'WHO PAID?'}
           {step === 'participants' && 'ADD PARTICIPANTS'}
+          {step === 'item-assign' && 'ASSIGN ITEMS'}
           {step === 'split-type' && 'CHOOSE SPLIT TYPE'}
           {step === 'custom-split' && 'CUSTOM SPLIT'}
           {step === 'review-split' && 'REVIEW SPLIT'}

@@ -200,12 +200,13 @@ def parse_receipt_lines(lines):
             print(f"  -> SKIP (name too short after cleanup)")
             continue
 
-        # For tax/service charge lines, always qty=1
-        if _TAX_SERVICE_PATTERNS.search(name):
+        # Tag tax/service charge lines
+        is_charge = bool(_TAX_SERVICE_PATTERNS.search(name))
+        if is_charge:
             qty = 1
 
-        print(f"  -> KEEP: name={name!r}, price={price}, qty={qty}")
-        items.append({'name': name, 'price': price, 'qty': qty})
+        print(f"  -> KEEP: name={name!r}, price={price}, qty={qty}, charge={is_charge}")
+        items.append({'name': name, 'price': price, 'qty': qty, 'is_charge': is_charge})
 
     print(f"[OCR] Final items: {items}")
     return items
@@ -238,6 +239,11 @@ def run_ocr(image_bytes):
 
     lines = _group_by_y(results)
     lines = _merge_split_lines(lines)
-    items = parse_receipt_lines(lines)
+    all_items = parse_receipt_lines(lines)
 
-    return items
+    food_items = [{'name': i['name'], 'price': i['price'], 'qty': i['qty']}
+                  for i in all_items if not i['is_charge']]
+    charges = [{'name': i['name'], 'price': i['price']}
+               for i in all_items if i['is_charge']]
+
+    return {'items': food_items, 'charges': charges}

@@ -81,6 +81,8 @@ export async function sendReminders(sessionId: string): Promise<void> {
 
 export async function scanReceipt(file: File): Promise<{
   items?: { name: string; price: number; qty: number }[];
+  charges?: { name: string; price: number }[];
+  subtotal?: number;
   total?: number;
   error?: string;
 }> {
