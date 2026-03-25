@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell } from 'lucide-react';
+import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell, X } from 'lucide-react';
 import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt } from '@/lib/api';
 
 export default function GroupPayPrototype() {
@@ -556,36 +556,134 @@ export default function GroupPayPrototype() {
           </div>
         )}
 
-        {/* OCR Result */}
-        {step === 'ocr-result' && (
+        {/* OCR Result — editable */}
+        {step === 'ocr-result' && (() => {
+          const updateItem = (index: number, field: 'name' | 'price' | 'qty', value: string) => {
+            setOcrItems(prev => prev.map((item, i) => i === index ? {
+              ...item,
+              [field]: field === 'name' ? value : Number(value) || 0,
+            } : item));
+          };
+          const removeItem = (index: number) => {
+            setOcrItems(prev => prev.filter((_, i) => i !== index));
+          };
+          const addItem = () => {
+            setOcrItems(prev => [...prev, { name: '', price: 0, qty: 1 }]);
+          };
+          const updateCharge = (index: number, field: 'name' | 'price', value: string) => {
+            setOcrCharges(prev => prev.map((c, i) => i === index ? {
+              ...c,
+              [field]: field === 'name' ? value : Number(value) || 0,
+            } : c));
+          };
+          const removeCharge = (index: number) => {
+            setOcrCharges(prev => prev.filter((_, i) => i !== index));
+          };
+          const computedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
+          const computedCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
+          const computedTotal = computedSubtotal + computedCharges;
+
+          return (
           <div className="glass rounded-3xl p-8 animate-in">
-            <div className="flex items-center gap-2 mb-6"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">Receipt Scanned Successfully</h2></div>
-            <div className="bg-white/5 rounded-xl p-4 mb-6 max-h-96 overflow-y-auto">
-              <div className="space-y-2">
-                {ocrItems.map((item, index) => (
-                  <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 1 || ocrCharges.length > 0 ? 'border-b border-white/10' : ''}`}>
-                    <div className="flex-1"><div className="text-white text-sm">{item.name}</div>{item.qty > 1 && <div className="text-white/50 text-xs mono">Qty: {item.qty}</div>}</div>
-                    <div className="text-green-400 mono font-semibold">${(item.price * item.qty).toFixed(2)}</div>
+            <div className="flex items-center gap-2 mb-2"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">Review Scanned Items</h2></div>
+            <p className="text-blue-200 text-sm mb-5">Edit names, prices, or remove incorrect items</p>
+
+            <div className="space-y-3 mb-4 max-h-[45vh] overflow-y-auto">
+              {ocrItems.map((item, index) => (
+                <div key={index} className="bg-white/5 rounded-xl p-3 border border-white/10">
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 space-y-2">
+                      <input
+                        type="text"
+                        value={item.name}
+                        onChange={(e) => updateItem(index, 'name', e.target.value)}
+                        className="w-full bg-white/10 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
+                        placeholder="Item name"
+                      />
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="text-white/40 text-[10px] uppercase tracking-wider">Price</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={item.price || ''}
+                            onChange={(e) => updateItem(index, 'price', e.target.value)}
+                            className="w-full bg-white/10 text-green-400 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
+                          />
+                        </div>
+                        <div className="w-16">
+                          <label className="text-white/40 text-[10px] uppercase tracking-wider">Qty</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.qty || ''}
+                            onChange={(e) => updateItem(index, 'qty', e.target.value)}
+                            className="w-full bg-white/10 text-white text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <button onClick={() => removeItem(index)} className="text-red-400/60 hover:text-red-400 p-1 mt-1">
+                      <X size={18} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button onClick={addItem} className="w-full mb-4 py-2.5 rounded-xl border-2 border-dashed border-white/20 text-white/50 hover:text-white hover:border-white/40 text-sm font-semibold transition-all">
+              + Add Item
+            </button>
+
+            {ocrCharges.length > 0 && (
+              <div className="mb-4">
+                <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">
+                  Charges {ocrChargesIncluded && <span className="text-amber-400 normal-case">(already included in prices)</span>}
+                </div>
+                {ocrCharges.map((charge, index) => (
+                  <div key={`charge-${index}`} className="flex items-center gap-2 mb-2">
+                    <input
+                      type="text"
+                      value={charge.name}
+                      onChange={(e) => updateCharge(index, 'name', e.target.value)}
+                      className="flex-1 bg-white/10 text-white/60 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={charge.price || ''}
+                      onChange={(e) => updateCharge(index, 'price', e.target.value)}
+                      className="w-24 bg-white/10 text-amber-400 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
+                    />
+                    <button onClick={() => removeCharge(index)} className="text-red-400/60 hover:text-red-400 p-1">
+                      <X size={18} />
+                    </button>
                   </div>
                 ))}
-                {ocrCharges.length > 0 && (
-                  <div className="pt-2">
-                    {ocrCharges.map((charge, index) => (
-                      <div key={`charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
-                        <div className="text-white/50 text-sm">{charge.name}</div>
-                        <div className="text-amber-400 mono font-semibold">${charge.price.toFixed(2)}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
-              <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${billAmount}</span></div>
+            )}
+
+            <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
+              <div className="flex justify-between items-center">
+                <span className="text-white font-bold">TOTAL</span>
+                <span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span>
+              </div>
+              {!ocrChargesIncluded && computedCharges > 0 && (
+                <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>
+              )}
             </div>
-            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} charges${ocrChargesIncluded ? ' (included in prices)' : ''}` : ''} = ${billAmount}</p></div>
-            <button onClick={() => setStep('who-paid')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><span>Continue</span><ArrowRight size={20} /></button>
+
+            <button onClick={() => {
+              setOcrSubtotal(computedSubtotal);
+              setBillAmount(computedTotal.toFixed(2));
+              setStep('who-paid');
+            }} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between">
+              <span>Continue</span><ArrowRight size={20} />
+            </button>
             <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
           </div>
-        )}
+          );
+        })()}
 
         {/* Manual Bill */}
         {step === 'manual-bill' && (
