@@ -95,18 +95,23 @@ def api_create_session():
         even_split=data.get("even_split", True),
         participants=data["participants"],
         chat_id=data.get("chat_id"),
+        thread_id=data.get("thread_id"),
         payee_phone=data.get("payee_phone"),
         payee_amount=data.get("payee_amount"),
     )
 
     # Announce in group chat if chat_id provided
     chat_id = data.get("chat_id")
-    print(f"[SESSION] Created {session['id']}, chat_id={chat_id}, participants={[p['name'] for p in data['participants']]}")
+    tid_kwargs = {}
+    thread_id = data.get("thread_id")
+    if thread_id:
+        tid_kwargs["message_thread_id"] = int(thread_id)
+    print(f"[SESSION] Created {session['id']}, chat_id={chat_id}, thread_id={thread_id}, participants={[p['name'] for p in data['participants']]}")
     if chat_id:
         try:
             cid = int(chat_id)
             session_url = f"{WEBAPP_URL}?session={session['id']}"
-            print(f"[BOT] Sending group message to chat {cid}")
+            print(f"[BOT] Sending group message to chat {cid} thread {thread_id}")
 
             # Build breakdown lines — include payee's share
             payee_amount = data.get("payee_amount", "0.00")
@@ -130,6 +135,7 @@ def api_create_session():
                 f"💸 <b>Who owes what:</b>\n{breakdown}",
                 parse_mode="HTML",
                 reply_markup=kb,
+                **tid_kwargs,
             )
             print(f"[BOT] Group message sent OK")
 
@@ -155,6 +161,7 @@ def api_create_session():
                         f"🔒 Only {p_mention} can reveal their PayNow QR code.",
                         parse_mode="HTML",
                         reply_markup=whisper_kb,
+                        **tid_kwargs,
                     )
                     print(f"[BOT] Whisper QR button sent for {p['name']}")
                 except Exception as e:
@@ -205,6 +212,9 @@ def api_remind(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
     chat_id = session.get("chat_id")
+    tid_kwargs = {}
+    if session.get("thread_id"):
+        tid_kwargs["message_thread_id"] = int(session["thread_id"])
     unpaid = [p for p in session["participants"] if p["status"] != "paid"]
     if not unpaid:
         return jsonify({"ok": True, "reminded": []})
@@ -227,6 +237,7 @@ def api_remind(session_id):
                 f"Please pay soon! 🙏",
                 parse_mode="HTML",
                 reply_markup=kb,
+                **tid_kwargs,
             )
             print(f"[BOT] Reminder sent to group {cid} for {len(unpaid)} unpaid")
         except Exception as e:
@@ -260,16 +271,19 @@ def api_ocr():
 
     items = result.get("items", [])
     charges = result.get("charges", [])
+    charges_included = result.get("charges_included", False)
 
     if not items:
         return jsonify({"error": "No items found on receipt. Try a clearer photo."})
 
     subtotal = sum(item["price"] * item["qty"] for item in items)
     charges_total = sum(c["price"] for c in charges)
-    total = subtotal + charges_total
+    # If charges are already included in menu prices, don't add them
+    total = subtotal if charges_included else subtotal + charges_total
     return jsonify({
         "items": items,
         "charges": charges,
+        "charges_included": charges_included,
         "subtotal": round(subtotal, 2),
         "total": round(total, 2),
     })
@@ -289,6 +303,9 @@ def api_self_confirm(session_id, name):
     db.update_participant_status(session_id, name, "self-confirmed")
     # Notify group chat
     chat_id = session.get("chat_id")
+    tid_kwargs = {}
+    if session.get("thread_id"):
+        tid_kwargs["message_thread_id"] = int(session["thread_id"])
     if chat_id:
         try:
             cid = int(chat_id)
@@ -298,6 +315,7 @@ def api_self_confirm(session_id, name):
                 f"💸 {p_mention} says they've paid <b>${participant['amount']}</b>.\n"
                 f"Awaiting confirmation from {_mention(session['payee'], chat_id=cid)}.",
                 parse_mode="HTML",
+                **tid_kwargs,
             )
         except Exception as e:
             print(f"[BOT ERROR] Self-confirm notify failed: {e}")
@@ -449,10 +467,12 @@ def _track_member(msg):
         _save_members()
 
 
-def _build_webapp_url(chat_id: int) -> str:
-    """Build webapp URL with known members and chat_id as query params."""
+def _build_webapp_url(chat_id: int, thread_id: int | None = None) -> str:
+    """Build webapp URL with known members, chat_id, and thread_id as query params."""
     members = group_members.get(chat_id, {})
     parts_list = [f"chat_id={chat_id}"]
+    if thread_id:
+        parts_list.append(f"thread_id={thread_id}")
     if members:
         member_str = ",".join(f"{quote(name)}:{uid}" for uid, name in members.items())
         parts_list.append(f"members={member_str}")
@@ -462,7 +482,8 @@ def _build_webapp_url(chat_id: int) -> str:
 
 def _make_keyboard(msg) -> types.InlineKeyboardMarkup:
     """Create the Open GroupPay button — web_app in private, url in groups."""
-    url = _build_webapp_url(msg.chat.id)
+    thread_id = getattr(msg, 'message_thread_id', None)
+    url = _build_webapp_url(msg.chat.id, thread_id)
     kb = types.InlineKeyboardMarkup()
     if msg.chat.type == "private":
         kb.add(types.InlineKeyboardButton(
@@ -550,6 +571,12 @@ def handle_qr_whisper(call):
         pass
 
 
+def _thread_kwargs(msg) -> dict:
+    """Return message_thread_id kwarg if the message is in a forum topic."""
+    tid = getattr(msg, 'message_thread_id', None)
+    return {"message_thread_id": tid} if tid else {}
+
+
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
     _track_member(msg)
@@ -560,6 +587,7 @@ def cmd_start(msg):
         "Tap the button below or use /split to open the app.",
         parse_mode="Markdown",
         reply_markup=_make_keyboard(msg),
+        **_thread_kwargs(msg),
     )
 
 
@@ -571,6 +599,7 @@ def cmd_split(msg):
         "📢 *Let's split a bill!*\n\nTap below to open GroupPay:",
         parse_mode="Markdown",
         reply_markup=_make_keyboard(msg),
+        **_thread_kwargs(msg),
     )
 
 
@@ -584,6 +613,7 @@ def cmd_help(msg):
         "/split — Start a new bill split\n"
         "/help — Show this help message",
         parse_mode="Markdown",
+        **_thread_kwargs(msg),
     )
 
 

@@ -17,6 +17,7 @@ export default function GroupPayPrototype() {
   const [ocrScanning, setOcrScanning] = useState(false);
   const [ocrItems, setOcrItems] = useState<{ name: string; price: number; qty: number }[]>([]);
   const [ocrCharges, setOcrCharges] = useState<{ name: string; price: number }[]>([]);
+  const [ocrChargesIncluded, setOcrChargesIncluded] = useState(false);
   const [ocrSubtotal, setOcrSubtotal] = useState(0);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrError, setOcrError] = useState<string | null>(null);
@@ -231,6 +232,7 @@ export default function GroupPayPrototype() {
       }
       setOcrItems(result.items);
       setOcrCharges(result.charges ?? []);
+      setOcrChargesIncluded(result.charges_included ?? false);
       setOcrSubtotal(result.subtotal ?? 0);
       setBillAmount((result.total ?? 0).toFixed(2));
       setItemAssignments({});
@@ -397,9 +399,10 @@ export default function GroupPayPrototype() {
       };
     });
 
-    // Get chat_id from URL if available
+    // Get chat_id and thread_id from URL if available
     const params = new URLSearchParams(window.location.search);
     const chatId = params.get('chat_id') || undefined;
+    const threadId = params.get('thread_id') || undefined;
 
     try {
       const session = await createSession({
@@ -411,6 +414,7 @@ export default function GroupPayPrototype() {
         even_split: !!evenSplit,
         participants: participantData,
         chat_id: chatId,
+        thread_id: threadId,
       });
       setSessionId(session.id);
       // Update URL so this session is bookmarkable/revisitable
@@ -577,7 +581,7 @@ export default function GroupPayPrototype() {
               </div>
               <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${billAmount}</span></div>
             </div>
-            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items + {ocrCharges.length} charges = ${billAmount}</p></div>
+            <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} charges${ocrChargesIncluded ? ' (included in prices)' : ''}` : ''} = ${billAmount}</p></div>
             <button onClick={() => setStep('who-paid')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><span>Continue</span><ArrowRight size={20} /></button>
             <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
           </div>
@@ -843,7 +847,7 @@ export default function GroupPayPrototype() {
         {/* Item Assignment (receipt scan only) */}
         {step === 'item-assign' && (() => {
           const allPeople = [currentUser, ...otherParticipants];
-          const totalCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
+          const totalCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
           const assignedCount = ocrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
           const allAssigned = assignedCount === ocrItems.length;
 

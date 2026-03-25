@@ -141,6 +141,16 @@ def _clean_name(name):
     return name.strip()
 
 
+def _extract_grand_total(lines):
+    """Try to find the grand total value from receipt lines."""
+    for line in lines:
+        if _TOTAL_PATTERNS.search(line) and 'qty' not in line.lower() and 'sub' not in line.lower():
+            prices = _SG_PRICE_RE.findall(line)
+            if prices:
+                return float(prices[-1])
+    return None
+
+
 def parse_receipt_lines(lines):
     """Parse OCR text lines into structured receipt items."""
     items = []
@@ -246,4 +256,20 @@ def run_ocr(image_bytes):
     charges = [{'name': i['name'], 'price': i['price']}
                for i in all_items if i['is_charge']]
 
-    return {'items': food_items, 'charges': charges}
+    # Detect if charges are already included in menu prices.
+    # Extract grand total from the lines we skipped earlier.
+    grand_total = _extract_grand_total(lines)
+    food_subtotal = sum(i['price'] * i['qty'] for i in food_items)
+    charges_total = sum(c['price'] for c in charges)
+
+    charges_included = False
+    if grand_total and charges:
+        # If grand total ≈ food subtotal, charges are already in the prices
+        if abs(grand_total - food_subtotal) < 0.50:
+            charges_included = True
+            print(f"[OCR] Charges appear INCLUDED in menu prices (grand total {grand_total} ≈ food subtotal {food_subtotal})")
+        # If grand total ≈ food + charges, charges are extra
+        elif abs(grand_total - (food_subtotal + charges_total)) < 0.50:
+            print(f"[OCR] Charges appear EXCLUDED from menu prices (grand total {grand_total} ≈ food {food_subtotal} + charges {charges_total})")
+
+    return {'items': food_items, 'charges': charges, 'charges_included': charges_included}

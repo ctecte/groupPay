@@ -26,6 +26,7 @@ export async function createSession(data: {
   even_split: boolean;
   participants: { name: string; amount: string; telegram_id?: string }[];
   chat_id?: string;
+  thread_id?: string;
 }): Promise<Session> {
   const res = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
@@ -82,6 +83,7 @@ export async function sendReminders(sessionId: string): Promise<void> {
 export async function scanReceipt(file: File): Promise<{
   items?: { name: string; price: number; qty: number }[];
   charges?: { name: string; price: number }[];
+  charges_included?: boolean;
   subtotal?: number;
   total?: number;
   error?: string;

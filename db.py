@@ -28,6 +28,7 @@ def init_db():
             payee_amount TEXT,
             even_split INTEGER NOT NULL DEFAULT 1,
             chat_id TEXT,
+            thread_id TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS participants (
@@ -49,14 +50,15 @@ def init_db():
 def create_session(event_name: str, bill_amount: str, payee: str,
                    even_split: bool, participants: list[dict],
                    chat_id: str | None = None,
+                   thread_id: str | None = None,
                    payee_phone: str | None = None,
                    payee_amount: str | None = None) -> dict:
     session_id = uuid.uuid4().hex[:12]
     now = datetime.utcnow().isoformat()
     conn = _connect()
     conn.execute(
-        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_phone, payee_amount, even_split, chat_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (session_id, event_name, bill_amount, payee, payee_phone, payee_amount, int(even_split), chat_id, now),
+        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_phone, payee_amount, even_split, chat_id, thread_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (session_id, event_name, bill_amount, payee, payee_phone, payee_amount, int(even_split), chat_id, thread_id, now),
     )
     for p in participants:
         conn.execute(
