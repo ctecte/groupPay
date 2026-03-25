@@ -252,8 +252,6 @@ def api_ocr():
         return jsonify({"error": "No image uploaded"}), 400
 
     f = request.files["receipt"]
-    f.save(os.path.join(UPLOAD_DIR, "ocr_debug.jpg"))
-    f.seek(0)
     image_bytes = f.read()
     print(f"[OCR] Received image: {len(image_bytes)} bytes")
 

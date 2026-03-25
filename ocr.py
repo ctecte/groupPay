@@ -4,20 +4,34 @@ Extracts line items (name, price, qty) from receipt images.
 """
 
 import io
+import os
 import re
 import tempfile
-import threading
+from concurrent.futures import ProcessPoolExecutor
 
 from PIL import Image, ImageOps
 
 
-_lock = threading.Lock()
+# Single-worker process pool — model loads once in the subprocess and stays warm
+_pool = None
 
 
-def _create_ocr():
-    """Create a fresh PaddleOCR instance."""
-    from paddleocr import PaddleOCR
-    return PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = ProcessPoolExecutor(max_workers=1)
+    return _pool
+
+
+def _ocr_in_subprocess(tmp_path):
+    """Run PaddleOCR in an isolated subprocess. Model stays loaded between calls."""
+    global _subprocess_ocr
+    try:
+        _subprocess_ocr
+    except NameError:
+        from paddleocr import PaddleOCR
+        _subprocess_ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+    return _subprocess_ocr.ocr(tmp_path)
 
 
 # Lines to skip — headers, footers, payment methods, etc.
@@ -237,11 +251,9 @@ def run_ocr(image_bytes):
         img.save(tmp, format='JPEG', quality=95)
         tmp_path = tmp.name
 
-    with _lock:
-        ocr = _create_ocr()
-        results = ocr.ocr(tmp_path)
+    future = _get_pool().submit(_ocr_in_subprocess, tmp_path)
+    results = future.result(timeout=60)
 
-    import os
     os.unlink(tmp_path)
 
     if not results or not results[0]:
