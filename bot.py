@@ -491,11 +491,18 @@ def handle_qr_whisper(call):
     print(f"[WHISPER] Click by {clicker.first_name} (id={clicker.id}, username={clicker.username}) — target: {target_name} (tid={target_tid})")
 
     # Check if clicker is the intended recipient
-    is_target = (
-        str(clicker.id) == target_tid
-        or (clicker.first_name or "").lower() == target_name.lower()
-        or (clicker.username or "").lower() == target_name.lower()
-    )
+    # Telegram ID is the strongest check; username (@tag) is unique and stable;
+    # first_name is NOT checked when ID is known (easily duplicated)
+    if target_tid and target_tid != "0":
+        is_target = (
+            str(clicker.id) == target_tid
+            or (clicker.username or "").lower() == target_name.lower()
+        )
+    else:
+        is_target = (
+            (clicker.first_name or "").lower() == target_name.lower()
+            or (clicker.username or "").lower() == target_name.lower()
+        )
 
     if not is_target:
         bot.answer_callback_query(
