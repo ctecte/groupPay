@@ -254,6 +254,10 @@ def api_ocr():
     f = request.files["receipt"]
     image_bytes = f.read()
     print(f"[OCR] Received image: {len(image_bytes)} bytes")
+    # Debug: save uploaded image for inspection
+    debug_path = os.path.join(UPLOAD_DIR, "ocr_latest.jpg")
+    with open(debug_path, "wb") as df:
+        df.write(image_bytes)
 
     if len(image_bytes) > 10 * 1024 * 1024:
         return jsonify({"error": "Image too large (max 10MB)"}), 400

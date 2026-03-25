@@ -46,7 +46,19 @@ _SKIP_PATTERNS = re.compile(
     r'^\d{1,2}:\d{2}\s*(am|pm)?\s*$|'  # time-only lines
     r'^#{4,}|^-{4,}|^={4,}|^\*{4,}|'  # separator lines
     r'pax\s*\d|'  # PAX count
-    r'^\d+[/\-]\d+[/\-]\d+\s+\d+:\d+',  # date+time lines
+    r'^\d+[/\-]\d+[/\-]\d+\s+\d+:\d+|'  # date+time lines
+    # Payment terminal / card slip lines
+    r'\b(MID|TID|BATCH|TRACE|INV|ECR|APPR|S/W|CONTACTLESS|PAYPASS|PAYWAVE|CHIP|PIN|OFFUS)\b|'
+    r'\b(MASTER\s*CARD|VISA\s*CARD|CREDIT\s*CARD|DEBIT\s*CARD)\b|'
+    r'\b(BASE|APPROVED|DECLINED|SALE|REFUND)\b|'
+    r'\*{4,}\s*\d{4}|'  # masked card number ****1234
+    r'^(slip|staff|barcode|description|amount|qty|pos)\s*[:.]?$',
+    re.IGNORECASE
+)
+
+# Stop parsing after these lines — everything below is payment slip / footer
+_STOP_PATTERNS = re.compile(
+    r'\b(credit\s*card|debit\s*card|master\s*card|visa|nets|cash\s*tendered|amount\s*tendered)\b',
     re.IGNORECASE
 )
 
@@ -168,9 +180,20 @@ def _extract_grand_total(lines):
 def parse_receipt_lines(lines):
     """Parse OCR text lines into structured receipt items."""
     items = []
+    stopped = False
 
     for line in lines:
         print(f"[OCR LINE] {line!r}")
+
+        if stopped:
+            print(f"  -> SKIP (after stop line)")
+            continue
+
+        # Stop parsing at payment slip / card lines
+        if _STOP_PATTERNS.search(line):
+            print(f"  -> STOP (payment method line — rest is card slip)")
+            stopped = True
+            continue
 
         # Skip obvious non-item lines
         if _SKIP_PATTERNS.search(line):
