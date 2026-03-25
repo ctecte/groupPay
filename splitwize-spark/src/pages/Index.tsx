@@ -20,7 +20,6 @@ export default function GroupPayPrototype() {
   const [ocrSubtotal, setOcrSubtotal] = useState(0);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrError, setOcrError] = useState<string | null>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
   const [screenshotUploaded, setScreenshotUploaded] = useState(false);
@@ -44,12 +43,10 @@ export default function GroupPayPrototype() {
   const [paymentHistory, setPaymentHistory] = useState<{ name: string; amount: string; time: string }[]>([]);
 
   // GST state
-  const [billType, setBillType] = useState<'total' | 'subtotal'>('total');
   const [serviceChargeOn, setServiceChargeOn] = useState(false);
   const [gstOn, setGstOn] = useState(false);
   const [serviceChargeRate, setServiceChargeRate] = useState(10);
   const [gstRate, setGstRate] = useState(9);
-  const [showGstBreakdown, setShowGstBreakdown] = useState(true);
 
   // Split method state
   const [splitMethod, setSplitMethod] = useState<'amount' | 'percentage' | 'shares'>('amount');
@@ -165,16 +162,19 @@ export default function GroupPayPrototype() {
     return false;
   })();
 
-  // GST calculations
-  const subtotalAmount = parseFloat(billAmount) || 0;
-  const serviceChargeAmount = billType === 'subtotal' && serviceChargeOn ? subtotalAmount * (serviceChargeRate / 100) : 0;
-  const baseAfterSC = subtotalAmount + serviceChargeAmount;
-  const gstAmount = billType === 'subtotal' && gstOn ? baseAfterSC * (gstRate / 100) : 0;
-  const finalBillAmount = billType === 'subtotal' ? baseAfterSC + gstAmount : subtotalAmount;
+  // Bill is always the grand total
+  const finalBillAmount = parseFloat(billAmount) || 0;
   const finalBillStr = finalBillAmount.toFixed(2);
-  const hasGstCharges = billType === 'subtotal' && (serviceChargeOn || gstOn);
-  const ppMultiplier = subtotalAmount > 0 ? finalBillAmount / subtotalAmount : 1;
-  const useMenuPriceMode = menuPriceMode && hasGstCharges && splitMethod === 'amount';
+
+  // ++ multiplier from user-selected rates (for menu price mode)
+  const hasCharges = serviceChargeOn || gstOn;
+  const scFactor = serviceChargeOn ? (1 + serviceChargeRate / 100) : 1;
+  const gstFactor = gstOn ? (1 + gstRate / 100) : 1;
+  const ppMultiplier = scFactor * gstFactor;
+  const impliedSubtotal = hasCharges ? finalBillAmount / ppMultiplier : finalBillAmount;
+  const impliedSC = serviceChargeOn ? impliedSubtotal * (serviceChargeRate / 100) : 0;
+  const impliedGST = gstOn ? (impliedSubtotal + impliedSC) * (gstRate / 100) : 0;
+  const useMenuPriceMode = menuPriceMode && hasCharges && splitMethod === 'amount';
 
   // Sum item lines for a person (menu prices)
   const getItemLinesSum = (person: string) => {
@@ -526,16 +526,14 @@ export default function GroupPayPrototype() {
         {step === 'ocr-scan' && (
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Scan Your Receipt</h2>
-            <p className="text-blue-200 text-sm mb-6">Take a photo or upload an image of your receipt</p>
-            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+            <p className="text-blue-200 text-sm mb-6">Upload a clear image of your receipt, and try again if the scan is incorrect</p>
             <input ref={galleryInputRef} type="file" accept="image/*" onChange={handleFileSelect} className="hidden" />
             <div className="relative bg-black/40 rounded-2xl p-4 mb-6 aspect-[3/4] flex items-center justify-center border-2 border-dashed border-blue-400/50">
               {!ocrScanning ? (
                 <div className="text-center">
                   <Camera className="text-blue-400 mx-auto mb-4" size={64} />
-                  <p className="text-white/70 text-sm mb-6">Ready to scan</p>
-                  <button onClick={() => cameraInputRef.current?.click()} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold mb-3 w-full">📷 Capture Receipt</button>
-                  <button onClick={() => galleryInputRef.current?.click()} className="btn-secondary text-white px-8 py-3 rounded-xl font-semibold w-full border border-white/20">📁 Upload from Gallery</button>
+                  <p className="text-white/70 text-sm mb-6">Please upload a clear image of the receipt</p>
+                  <button onClick={() => galleryInputRef.current?.click()} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold w-full">📁 Upload Receipt</button>
                   {ocrError && (
                     <div className="mt-4 bg-red-500/10 rounded-xl p-3 border border-red-400/30">
                       <p className="text-red-200 text-sm">{ocrError}</p>
@@ -585,122 +583,22 @@ export default function GroupPayPrototype() {
           </div>
         )}
 
-        {/* Manual Bill with GST */}
+        {/* Manual Bill */}
         {step === 'manual-bill' && (
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Enter Bill Amount</h2>
-            <p className="text-blue-200 text-sm mb-5">Does this amount already include GST?</p>
-
-            <div className="flex gap-2 mb-5">
-              <button
-                onClick={() => { setBillType('total'); setServiceChargeOn(false); setGstOn(false); }}
-                className={`flex-1 rounded-xl px-4 py-3 text-sm font-semibold transition-all border-2 ${
-                  billType === 'total'
-                    ? 'bg-blue-500/20 border-blue-400/60 text-white'
-                    : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
-                }`}
-              >
-                <div className="font-bold">Yes (Total)</div>
-                <div className="text-[10px] opacity-70 mt-0.5">Bill includes everything</div>
-              </button>
-              <button
-                onClick={() => setBillType('subtotal')}
-                className={`flex-1 rounded-xl px-4 py-3 text-sm font-semibold transition-all border-2 ${
-                  billType === 'subtotal'
-                    ? 'bg-amber-500/20 border-amber-400/60 text-white'
-                    : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
-                }`}
-              >
-                <div className="font-bold">No (Subtotal)</div>
-                <div className="text-[10px] opacity-70 mt-0.5">Need to add GST/SC</div>
-              </button>
-            </div>
+            <p className="text-blue-200 text-sm mb-5">Enter the total amount on your bill</p>
 
             <div className="mb-5">
-              <div className="text-white/50 text-xs mb-1.5">{billType === 'total' ? 'Total Amount' : 'Subtotal (before charges)'}</div>
+              <div className="text-white/50 text-xs mb-1.5">Total Amount</div>
               <div className="relative">
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 text-white/50 text-2xl mono">$</span>
                 <input type="number" value={billAmount} onChange={(e) => setBillAmount(e.target.value)} placeholder="0.00" className="w-full bg-white/10 border border-white/20 rounded-xl px-12 py-4 text-white text-2xl mono placeholder-white/30 focus:outline-none focus:border-blue-400" step="0.01" />
               </div>
             </div>
 
-            {billType === 'subtotal' && (
-              <div className="space-y-3 mb-5 animate-in">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => { setServiceChargeOn(true); setGstOn(true); setServiceChargeRate(10); setGstRate(9); }}
-                    className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
-                      serviceChargeOn && gstOn && serviceChargeRate === 10 && gstRate === 9
-                        ? 'bg-green-500/20 border-green-400/50 text-green-300'
-                        : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
-                    }`}
-                  >
-                    SG Standard<br /><span className="opacity-70">10% SC + 9% GST</span>
-                  </button>
-                  <button
-                    onClick={() => { setServiceChargeOn(false); setGstOn(false); }}
-                    className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
-                      !serviceChargeOn && !gstOn
-                        ? 'bg-white/10 border-white/30 text-white'
-                        : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
-                    }`}
-                  >
-                    No Taxes<br /><span className="opacity-70">Use subtotal as-is</span>
-                  </button>
-                </div>
-
-                <div className="bg-white/5 rounded-xl p-4 border border-white/10 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-white text-sm font-semibold">Service Charge</div>
-                      <div className="text-white/40 text-xs">{serviceChargeRate}% of subtotal</div>
-                    </div>
-                    <button
-                      onClick={() => setServiceChargeOn(!serviceChargeOn)}
-                      className={`w-11 h-6 rounded-full transition-all relative ${serviceChargeOn ? 'bg-blue-500' : 'bg-white/20'}`}
-                    >
-                      <div className={`w-5 h-5 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${serviceChargeOn ? 'left-[22px]' : 'left-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-white text-sm font-semibold">GST</div>
-                      <div className="text-white/40 text-xs">{gstRate}% of subtotal + SC</div>
-                    </div>
-                    <button
-                      onClick={() => setGstOn(!gstOn)}
-                      className={`w-11 h-6 rounded-full transition-all relative ${gstOn ? 'bg-blue-500' : 'bg-white/20'}`}
-                    >
-                      <div className={`w-5 h-5 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${gstOn ? 'left-[22px]' : 'left-0.5'}`} />
-                    </button>
-                  </div>
-                </div>
-
-                {subtotalAmount > 0 && (serviceChargeOn || gstOn) && (
-                  <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-xl p-4 border border-green-400/20 animate-in">
-                    <button onClick={() => setShowGstBreakdown(!showGstBreakdown)} className="w-full flex items-center justify-between mb-2">
-                      <span className="text-green-300 text-xs font-bold uppercase tracking-wider">Breakdown</span>
-                      <span className="text-white/40 text-xs">{showGstBreakdown ? 'Hide' : 'Show'}</span>
-                    </button>
-                    {showGstBreakdown && (
-                      <div className="space-y-2 text-sm mono">
-                        <div className="flex justify-between"><span className="text-white/70">Subtotal</span><span className="text-white">${subtotalAmount.toFixed(2)}</span></div>
-                        {serviceChargeOn && (
-                          <div className="flex justify-between"><span className="text-white/70">Service ({serviceChargeRate}%)</span><span className="text-amber-300">+${serviceChargeAmount.toFixed(2)}</span></div>
-                        )}
-                        {gstOn && (
-                          <div className="flex justify-between"><span className="text-white/70">GST ({gstRate}%)</span><span className="text-amber-300">+${gstAmount.toFixed(2)}</span></div>
-                        )}
-                        <div className="border-t border-white/20 pt-2 flex justify-between font-bold"><span className="text-white">Total</span><span className="text-green-400">${finalBillStr}</span></div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
             <button onClick={() => setStep('who-paid')} disabled={!billAmount || parseFloat(billAmount) <= 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed">
-              <span>Continue{hasGstCharges ? ` — $${finalBillStr}` : ''}</span><ArrowRight size={20} />
+              <span>Continue</span><ArrowRight size={20} />
             </button>
             <button onClick={() => setStep('ocr-choice')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
           </div>
@@ -1126,7 +1024,7 @@ export default function GroupPayPrototype() {
         {/* Custom Split */}
         {step === 'custom-split' && (() => {
           const total = finalBillAmount;
-          const tallyTarget = useMenuPriceMode ? subtotalAmount : finalBillAmount;
+          const tallyTarget = useMenuPriceMode ? impliedSubtotal : finalBillAmount;
           const allKeys = [currentUser, ...otherParticipants];
 
           let assigned = 0;
@@ -1176,7 +1074,7 @@ export default function GroupPayPrototype() {
             </h2>
             <p className="text-blue-200 text-sm mb-3">
               {useMenuPriceMode ? (
-                <>Subtotal: <span className="mono font-bold text-white">${subtotalAmount.toFixed(2)}</span> <span className="text-white/40">→ Total: ${total.toFixed(2)}</span></>
+                <>Menu subtotal: <span className="mono font-bold text-white">${impliedSubtotal.toFixed(2)}</span> <span className="text-white/40">→ Total: ${total.toFixed(2)}</span></>
               ) : (
                 <>Total: <span className="mono font-bold text-white">${total.toFixed(2)}</span></>
               )}
@@ -1202,18 +1100,82 @@ export default function GroupPayPrototype() {
               ))}
             </div>
 
-            {hasGstCharges && splitMethod === 'amount' && (
-              <button
-                onClick={() => setMenuPriceMode(!menuPriceMode)}
-                className={`w-full mb-4 flex items-center justify-between rounded-xl px-4 py-3 text-sm font-semibold transition-all border ${
-                  menuPriceMode
-                    ? 'bg-amber-500/15 border-amber-400/30 text-amber-300'
-                    : 'bg-white/5 border-white/10 text-white/50'
-                }`}
-              >
-                <span>{menuPriceMode ? 'Menu price mode (auto ++)' : 'Enter final amounts'}</span>
-                <span className="text-xs mono">{menuPriceMode ? 'ON' : 'OFF'}</span>
-              </button>
+            {splitMethod === 'amount' && (
+              <div className="mb-4 space-y-3 animate-in">
+                <button
+                  onClick={() => setMenuPriceMode(!menuPriceMode)}
+                  className={`w-full flex items-center justify-between rounded-xl px-4 py-3 text-sm font-semibold transition-all border ${
+                    menuPriceMode
+                      ? 'bg-amber-500/15 border-amber-400/30 text-amber-300'
+                      : 'bg-white/5 border-white/10 text-white/50'
+                  }`}
+                >
+                  <span>{menuPriceMode ? 'Menu price mode (auto ++)' : 'Enter final amounts'}</span>
+                  <span className="text-xs mono">{menuPriceMode ? 'ON' : 'OFF'}</span>
+                </button>
+
+                {menuPriceMode && (
+                  <div className="space-y-2 animate-in">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setServiceChargeOn(true); setGstOn(true); setServiceChargeRate(10); setGstRate(9); }}
+                        className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
+                          serviceChargeOn && gstOn && serviceChargeRate === 10 && gstRate === 9
+                            ? 'bg-green-500/20 border-green-400/50 text-green-300'
+                            : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                        }`}
+                      >
+                        SG Standard<br /><span className="opacity-70">10% SC + 9% GST</span>
+                      </button>
+                      <button
+                        onClick={() => { setServiceChargeOn(true); setGstOn(false); setServiceChargeRate(10); }}
+                        className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
+                          serviceChargeOn && !gstOn
+                            ? 'bg-blue-500/20 border-blue-400/50 text-blue-300'
+                            : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                        }`}
+                      >
+                        SC only<br /><span className="opacity-70">10% Service Charge</span>
+                      </button>
+                      <button
+                        onClick={() => { setServiceChargeOn(false); setGstOn(true); setGstRate(9); }}
+                        className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all border ${
+                          !serviceChargeOn && gstOn
+                            ? 'bg-purple-500/20 border-purple-400/50 text-purple-300'
+                            : 'bg-white/5 border-white/10 text-white/60 hover:border-white/30'
+                        }`}
+                      >
+                        GST only<br /><span className="opacity-70">9% GST</span>
+                      </button>
+                    </div>
+
+                    <div className="bg-white/5 rounded-xl p-3 border border-white/10 flex items-center gap-3">
+                      <div className="flex items-center gap-2 flex-1">
+                        <span className="text-white/60 text-xs">SC</span>
+                        <button
+                          onClick={() => setServiceChargeOn(!serviceChargeOn)}
+                          className={`w-9 h-5 rounded-full transition-all relative ${serviceChargeOn ? 'bg-blue-500' : 'bg-white/20'}`}
+                        >
+                          <div className={`w-4 h-4 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${serviceChargeOn ? 'left-[18px]' : 'left-0.5'}`} />
+                        </button>
+                        {serviceChargeOn && <span className="text-white/40 text-xs mono">{serviceChargeRate}%</span>}
+                      </div>
+                      <div className="w-px h-4 bg-white/10" />
+                      <div className="flex items-center gap-2 flex-1">
+                        <span className="text-white/60 text-xs">GST</span>
+                        <button
+                          onClick={() => setGstOn(!gstOn)}
+                          className={`w-9 h-5 rounded-full transition-all relative ${gstOn ? 'bg-blue-500' : 'bg-white/20'}`}
+                        >
+                          <div className={`w-4 h-4 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${gstOn ? 'left-[18px]' : 'left-0.5'}`} />
+                        </button>
+                        {gstOn && <span className="text-white/40 text-xs mono">{gstRate}%</span>}
+                      </div>
+                      {hasCharges && <span className="text-amber-300 text-xs mono font-semibold">×{ppMultiplier.toFixed(4)}</span>}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             <div className="bg-white/5 rounded-xl p-4 mb-5 border border-white/10">
@@ -1381,11 +1343,11 @@ export default function GroupPayPrototype() {
 
             {reviewTab === 'overview' && (
               <div className="bg-white/5 rounded-xl p-4 mb-5">
-                {hasGstCharges ? (
+                {useMenuPriceMode ? (
                   <div className="mb-3 pb-3 border-b border-white/10 space-y-1.5">
-                    <div className="flex justify-between"><span className="text-white/50 text-sm">Subtotal</span><span className="text-white mono text-sm">${subtotalAmount.toFixed(2)}</span></div>
-                    {serviceChargeOn && <div className="flex justify-between"><span className="text-white/50 text-sm">Service ({serviceChargeRate}%)</span><span className="text-amber-300 mono text-sm">+${serviceChargeAmount.toFixed(2)}</span></div>}
-                    {gstOn && <div className="flex justify-between"><span className="text-white/50 text-sm">GST ({gstRate}%)</span><span className="text-amber-300 mono text-sm">+${gstAmount.toFixed(2)}</span></div>}
+                    <div className="flex justify-between"><span className="text-white/50 text-sm">Menu Subtotal</span><span className="text-white mono text-sm">${impliedSubtotal.toFixed(2)}</span></div>
+                    {serviceChargeOn && <div className="flex justify-between"><span className="text-white/50 text-sm">Service ({serviceChargeRate}%)</span><span className="text-amber-300 mono text-sm">+${impliedSC.toFixed(2)}</span></div>}
+                    {gstOn && <div className="flex justify-between"><span className="text-white/50 text-sm">GST ({gstRate}%)</span><span className="text-amber-300 mono text-sm">+${impliedGST.toFixed(2)}</span></div>}
                     <div className="flex justify-between items-center pt-1.5 border-t border-white/10"><span className="text-white font-bold">Total</span><span className="text-green-400 text-xl mono font-bold">${finalBillStr}</span></div>
                   </div>
                 ) : (
