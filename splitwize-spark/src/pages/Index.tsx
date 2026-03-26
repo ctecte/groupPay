@@ -20,6 +20,7 @@ export default function GroupPayPrototype() {
   const [ocrChargesIncluded, setOcrChargesIncluded] = useState(false);
   const [ocrSubtotal, setOcrSubtotal] = useState(0);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
+  const [ocrEditing, setOcrEditing] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
@@ -236,6 +237,7 @@ export default function GroupPayPrototype() {
       setOcrSubtotal(result.subtotal ?? 0);
       setBillAmount((result.total ?? 0).toFixed(2));
       setItemAssignments({});
+      setOcrEditing(false);
       setOcrScanning(false);
       setStep('ocr-result');
     } catch (e) {
@@ -556,7 +558,7 @@ export default function GroupPayPrototype() {
           </div>
         )}
 
-        {/* OCR Result — editable */}
+        {/* OCR Result — readonly with edit toggle */}
         {step === 'ocr-result' && (() => {
           const updateItem = (index: number, field: 'name' | 'price' | 'qty', value: string) => {
             setOcrItems(prev => prev.map((item, i) => i === index ? {
@@ -579,99 +581,124 @@ export default function GroupPayPrototype() {
           const removeCharge = (index: number) => {
             setOcrCharges(prev => prev.filter((_, i) => i !== index));
           };
+          const addCharge = (name: string, price: number, included: boolean) => {
+            setOcrCharges(prev => [...prev, { name, price }]);
+            if (included) setOcrChargesIncluded(true);
+          };
+          const toggleChargeIncluded = () => setOcrChargesIncluded(prev => !prev);
           const computedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
           const computedCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
           const computedTotal = computedSubtotal + computedCharges;
+          const hasMissingPrices = ocrItems.some(i => i.price === 0);
 
           return (
           <div className="glass rounded-3xl p-8 animate-in">
-            <div className="flex items-center gap-2 mb-2"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">Review Scanned Items</h2></div>
-            <p className="text-blue-200 text-sm mb-5">Edit names, prices, or remove incorrect items</p>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">{ocrEditing ? 'Edit Receipt' : 'Receipt Scanned'}</h2></div>
+              <button onClick={() => setOcrEditing(!ocrEditing)} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${ocrEditing ? 'bg-blue-500/20 border-blue-400/50 text-blue-300' : 'bg-white/5 border-white/15 text-white/50 hover:text-white'}`}>
+                <Edit2 size={14} className="inline mr-1" />{ocrEditing ? 'Done' : 'Edit'}
+              </button>
+            </div>
 
-            <div className="space-y-3 mb-4 max-h-[45vh] overflow-y-auto">
-              {ocrItems.map((item, index) => (
-                <div key={index} className="bg-white/5 rounded-xl p-3 border border-white/10">
-                  <div className="flex items-start gap-2">
-                    <div className="flex-1 space-y-2">
-                      <input
-                        type="text"
-                        value={item.name}
-                        onChange={(e) => updateItem(index, 'name', e.target.value)}
-                        className="w-full bg-white/10 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
-                        placeholder="Item name"
-                      />
-                      <div className="flex gap-2">
-                        <div className="flex-1">
-                          <label className="text-white/40 text-[10px] uppercase tracking-wider">Price</label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={item.price || ''}
-                            onChange={(e) => updateItem(index, 'price', e.target.value)}
-                            className="w-full bg-white/10 text-green-400 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
-                          />
-                        </div>
-                        <div className="w-16">
-                          <label className="text-white/40 text-[10px] uppercase tracking-wider">Qty</label>
-                          <input
-                            type="number"
-                            min="1"
-                            value={item.qty || ''}
-                            onChange={(e) => updateItem(index, 'qty', e.target.value)}
-                            className="w-full bg-white/10 text-white text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
-                          />
+            {!ocrEditing ? (
+              <>
+                <div className="bg-white/5 rounded-xl p-4 mb-6 max-h-96 overflow-y-auto">
+                  <div className="space-y-2">
+                    {ocrItems.map((item, index) => (
+                      <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 1 || ocrCharges.length > 0 ? 'border-b border-white/10' : ''}`}>
+                        <div className="flex-1"><div className={`text-sm ${item.price === 0 ? 'text-amber-300' : 'text-white'}`}>{item.name}</div>{item.qty > 1 && <div className="text-white/50 text-xs mono">Qty: {item.qty}</div>}</div>
+                        {item.price === 0 ? (
+                          <div className="text-amber-400 mono font-semibold flex items-center gap-1">$?.?? <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">needs price</span></div>
+                        ) : (
+                          <div className="text-green-400 mono font-semibold">${(item.price * item.qty).toFixed(2)}</div>
+                        )}
+                      </div>
+                    ))}
+                    {ocrCharges.length > 0 && (
+                      <div className="pt-2">
+                        {ocrCharges.map((charge, index) => (
+                          <div key={`charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
+                            <div className="text-white/50 text-sm">{charge.name}</div>
+                            <div className={`mono font-semibold ${ocrChargesIncluded ? 'text-white/30 line-through' : 'text-amber-400'}`}>
+                              {ocrChargesIncluded ? '' : '+'} ${charge.price.toFixed(2)}
+                            </div>
+                          </div>
+                        ))}
+                        <div className={`text-xs mt-1 px-2 py-1 rounded ${ocrChargesIncluded ? 'text-white/40 bg-white/5' : 'text-amber-300/80 bg-amber-500/10'}`}>
+                          {ocrChargesIncluded ? 'Already in menu prices — not added' : `+$${ocrCharges.reduce((s, c) => s + c.price, 0).toFixed(2)} added to total`}
                         </div>
                       </div>
+                    )}
+                  </div>
+                  <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
+                </div>
+                {hasMissingPrices ? (
+                  <div className="bg-amber-500/10 rounded-xl p-4 mb-6 border border-amber-400/30"><p className="text-amber-200 text-sm"><strong className="text-white">⚠ Some prices couldn't be read</strong><br />Tap <strong>Edit</strong> to fill in the missing prices before continuing.</p></div>
+                ) : (
+                  <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} charges${ocrChargesIncluded ? ' (included in prices)' : ''}` : ''} = ${computedTotal.toFixed(2)}</p></div>
+                )}
+              </>
+            ) : (
+              <>
+                <p className="text-blue-200 text-sm mb-5">Edit names, prices, or remove incorrect items</p>
+                <div className="space-y-3 mb-4 max-h-[45vh] overflow-y-auto">
+                  {ocrItems.map((item, index) => (
+                    <div key={index} className={`bg-white/5 rounded-xl p-3 border ${item.price === 0 ? 'border-amber-400/50 bg-amber-500/5' : 'border-white/10'}`}>
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 space-y-2">
+                          <input type="text" value={item.name} onChange={(e) => updateItem(index, 'name', e.target.value)} className="w-full bg-white/10 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none" placeholder="Item name" />
+                          <div className="flex gap-2">
+                            <div className="flex-1">
+                              <label className={`text-[10px] uppercase tracking-wider ${item.price === 0 ? 'text-amber-400' : 'text-white/40'}`}>{item.price === 0 ? 'Price ⚠' : 'Price'}</label>
+                              <input type="number" step="0.01" value={item.price || ''} onChange={(e) => updateItem(index, 'price', e.target.value)} placeholder={item.price === 0 ? '?.??' : ''} className={`w-full bg-white/10 text-sm mono rounded-lg px-3 py-2 border focus:outline-none ${item.price === 0 ? 'border-amber-400/50 text-amber-400 focus:border-amber-400 placeholder:text-amber-400/40' : 'border-white/10 text-green-400 focus:border-blue-400/50'}`} />
+                            </div>
+                            <div className="w-16">
+                              <label className="text-white/40 text-[10px] uppercase tracking-wider">Qty</label>
+                              <input type="number" min="1" value={item.qty || ''} onChange={(e) => updateItem(index, 'qty', e.target.value)} className="w-full bg-white/10 text-white text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none" />
+                            </div>
+                          </div>
+                        </div>
+                        <button onClick={() => removeItem(index)} className="text-red-400/60 hover:text-red-400 p-1 mt-1"><X size={18} /></button>
+                      </div>
                     </div>
-                    <button onClick={() => removeItem(index)} className="text-red-400/60 hover:text-red-400 p-1 mt-1">
-                      <X size={18} />
-                    </button>
+                  ))}
+                </div>
+                <button onClick={addItem} className="w-full mb-4 py-2.5 rounded-xl border-2 border-dashed border-white/20 text-white/50 hover:text-white hover:border-white/40 text-sm font-semibold transition-all">+ Add Item</button>
+                <div className={`mb-4 rounded-xl p-4 border ${ocrCharges.length > 0 ? (ocrChargesIncluded ? 'bg-white/5 border-white/10' : 'bg-amber-500/5 border-amber-400/20') : 'bg-white/5 border-white/10'}`}>
+                  <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">GST & Service Charge</div>
+                  {ocrCharges.length > 0 && (
+                    <>
+                      {ocrCharges.map((charge, index) => (
+                        <div key={`charge-${index}`} className="flex items-center gap-2 mb-2">
+                          <input type="text" value={charge.name} onChange={(e) => updateCharge(index, 'name', e.target.value)} className={`flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none ${ocrChargesIncluded ? 'text-white/30' : 'text-white/60'}`} />
+                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => updateCharge(index, 'price', e.target.value)} className={`w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none ${ocrChargesIncluded ? 'text-white/30 line-through' : 'text-amber-400'}`} />
+                          <button onClick={() => removeCharge(index)} className="text-red-400/60 hover:text-red-400 p-1"><X size={18} /></button>
+                        </div>
+                      ))}
+                      <div className="flex rounded-lg overflow-hidden border border-white/15 mt-3 mb-1">
+                        <button onClick={() => setOcrChargesIncluded(false)} className={`flex-1 py-2.5 text-xs font-semibold transition-all ${!ocrChargesIncluded ? 'bg-amber-500/25 text-amber-300 border-r border-amber-400/30' : 'bg-white/5 text-white/30 border-r border-white/10'}`}>
+                          Add to total
+                        </button>
+                        <button onClick={() => setOcrChargesIncluded(true)} className={`flex-1 py-2.5 text-xs font-semibold transition-all ${ocrChargesIncluded ? 'bg-white/10 text-white/60' : 'bg-white/5 text-white/30'}`}>
+                          Already in prices
+                        </button>
+                      </div>
+                      <div className={`text-xs mt-1 ${ocrChargesIncluded ? 'text-white/30' : 'text-amber-300/70'}`}>
+                        {ocrChargesIncluded ? 'Prices already include GST/svc — charges shown for info only' : `$${computedCharges.toFixed(2)} will be added on top and split proportionally`}
+                      </div>
+                    </>
+                  )}
+                  <div className={`flex gap-2 ${ocrCharges.length > 0 ? 'mt-3' : 'mt-0'}`}>
+                    <button onClick={() => addCharge('9% GST', +(computedSubtotal * 0.09).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 9% GST</button>
+                    <button onClick={() => addCharge('10% Svc Charge', +(computedSubtotal * 0.10).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 10% Svc</button>
                   </div>
                 </div>
-              ))}
-            </div>
-
-            <button onClick={addItem} className="w-full mb-4 py-2.5 rounded-xl border-2 border-dashed border-white/20 text-white/50 hover:text-white hover:border-white/40 text-sm font-semibold transition-all">
-              + Add Item
-            </button>
-
-            {ocrCharges.length > 0 && (
-              <div className="mb-4">
-                <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-2">
-                  Charges {ocrChargesIncluded && <span className="text-amber-400 normal-case">(already included in prices)</span>}
+                <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
+                  <div className="flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
+                  {!ocrChargesIncluded && computedCharges > 0 && <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>}
                 </div>
-                {ocrCharges.map((charge, index) => (
-                  <div key={`charge-${index}`} className="flex items-center gap-2 mb-2">
-                    <input
-                      type="text"
-                      value={charge.name}
-                      onChange={(e) => updateCharge(index, 'name', e.target.value)}
-                      className="flex-1 bg-white/10 text-white/60 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
-                    />
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={charge.price || ''}
-                      onChange={(e) => updateCharge(index, 'price', e.target.value)}
-                      className="w-24 bg-white/10 text-amber-400 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none"
-                    />
-                    <button onClick={() => removeCharge(index)} className="text-red-400/60 hover:text-red-400 p-1">
-                      <X size={18} />
-                    </button>
-                  </div>
-                ))}
-              </div>
+              </>
             )}
-
-            <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
-              <div className="flex justify-between items-center">
-                <span className="text-white font-bold">TOTAL</span>
-                <span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span>
-              </div>
-              {!ocrChargesIncluded && computedCharges > 0 && (
-                <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>
-              )}
-            </div>
 
             <button onClick={() => {
               setOcrSubtotal(computedSubtotal);

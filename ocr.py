@@ -9,7 +9,7 @@ import re
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 
 # Single-worker process pool — model loads once in the subprocess and stays warm
@@ -63,9 +63,9 @@ _STOP_PATTERNS = re.compile(
 )
 
 # Total/subtotal lines — skip these (frontend computes its own total)
-# Use character class [l1i] to handle OCR confusion between l/1/i
+# Handle OCR confusion: o↔a↔0, l↔1↔i (e.g. "Tatal", "Tota1", "T0tal")
 _TOTAL_PATTERNS = re.compile(
-    r'(sub[.\-\s]*tota[l1i]?|tota[l1i]?\b|grand[.\-\s]*tota[l1i]?|nett|net[.\-\s]*tota[l1i]?|amount[.\-\s]*due|ba[l1i]ance[.\-\s]*due|tota[l1i]?\s*qty)',
+    r'(sub[.\-\s]*t[oa0]t[a1i][l1ia]?|t[oa0]t[a1i][l1ia]?\b|grand[.\-\s]*t[oa0]t[a1i][l1ia]?|nett|net[.\-\s]*t[oa0]t[a1i][l1ia]?|amount[.\-\s]*due|ba[l1i]ance[.\-\s]*due|t[oa0]t[a1i][l1ia]?\s*qty)',
     re.IGNORECASE
 )
 
@@ -78,8 +78,12 @@ _TAX_SERVICE_PATTERNS = re.compile(
 # Singapore dollar price: S$9.90, $9.90, or just 9.90
 _SG_PRICE_RE = re.compile(r'S?\$?\s*(\d+\.\d{2})\b')
 
-# Qty prefix at start of line: "1x", "1 x", "2x", "2 x"
+# Qty prefix at start of line: "1x ", "1 x ", "2x ", "1xName" (no space)
 _QTY_PREFIX_RE = re.compile(r'^(\d+)\s*[xX×]\s+')
+# No-space variant: "1xTeriyaki" — digit(s), x, then uppercase letter
+_QTY_NOSPACE_RE = re.compile(r'^(\d+)[xX×]([A-Z])')
+# Bare "X " prefix — OCR splits "1x" across lines leaving just "X  ..."
+_BARE_X_RE = re.compile(r'^[xX×]\s{2,}')
 
 # Qty x price pattern anywhere: "2 x $9.90"
 _QTY_PRICE_RE = re.compile(r'(\d+)\s*[xX×]\s*S?\$?\s*(\d+\.\d{2})')
@@ -205,9 +209,51 @@ def parse_receipt_lines(lines):
             print(f"  -> SKIP (total)")
             continue
 
+        # Detect qty prefix: "1x ...", "1xName...", or bare "X ..."
+        detected_qty = 1
+        line_after_qty = line
+        qty_m = _QTY_PREFIX_RE.match(line)
+        nospace_m = _QTY_NOSPACE_RE.match(line) if not qty_m else None
+        bare_m = _BARE_X_RE.match(line) if not qty_m and not nospace_m else None
+
+        if qty_m:
+            detected_qty = int(qty_m.group(1))
+            line_after_qty = line[qty_m.end():]
+        elif nospace_m:
+            detected_qty = int(nospace_m.group(1))
+            # Keep the uppercase letter that was glued to "x"
+            line_after_qty = nospace_m.group(2) + line[nospace_m.end():]
+        elif bare_m:
+            detected_qty = 1
+            line_after_qty = line[bare_m.end():]
+
+        has_qty = bool(qty_m or nospace_m or bare_m)
+
         # Find all S$/$ prices in the line
         prices = _SG_PRICE_RE.findall(line)
+
         if not prices:
+            if has_qty:
+                # Qty prefix but no valid price — likely a garbled price.
+                # Keep with price=0 so user can edit. (May also catch sub-items
+                # on set-meal receipts, but those are easier to delete than
+                # re-add a missing item.)
+                print(f"  -> KEEP with price=0 (qty prefix but no price)")
+                name = line_after_qty
+                # Strip trailing garbled price/OCR noise from name.
+                words = name.split()
+                while words:
+                    w = words[-1]
+                    alpha = sum(1 for c in w if c.isalpha())
+                    if alpha < len(w) * 0.5 or len(w) <= 2:
+                        words.pop()
+                    else:
+                        break
+                name = ' '.join(words)
+                name = _clean_name(name)
+                if name and len(name) >= 2:
+                    items.append({'name': name, 'price': 0, 'qty': detected_qty, 'is_charge': False})
+                continue
             print(f"  -> SKIP (no price found)")
             continue
 
@@ -216,16 +262,18 @@ def parse_receipt_lines(lines):
         if price <= 0:
             continue
 
-        qty = 1
+        qty = detected_qty
         name = line
 
-        # Try qty prefix at start: "1x STU Karubi Set S$9.90"
-        qty_prefix = _QTY_PREFIX_RE.match(line)
-        if qty_prefix:
-            qty = int(qty_prefix.group(1))
-            # Strip the "1x " prefix and the price from the name
-            name = line[qty_prefix.end():]
-            name = _SG_PRICE_RE.sub('', name)
+        if has_qty:
+            # Strip the qty prefix; take text before the first price match
+            # (text after the price is usually background noise from OCR)
+            name = line_after_qty
+            price_match = _SG_PRICE_RE.search(name)
+            if price_match:
+                name = name[:price_match.start()]
+            else:
+                name = _SG_PRICE_RE.sub('', name)
         else:
             # Try qty x price pattern: "2 x $9.90"
             qty_match = _QTY_PRICE_RE.search(line)
@@ -244,7 +292,12 @@ def parse_receipt_lines(lines):
         name = _clean_name(name)
 
         if not name or len(name) < 2:
-            print(f"  -> SKIP (name too short after cleanup)")
+            if price > 0 and has_qty:
+                # Price detected but name got lost (OCR split) — keep as unnamed
+                print(f"  -> KEEP: unnamed item, price={price}, qty={qty}")
+                items.append({'name': '(unnamed item)', 'price': price, 'qty': qty, 'is_charge': False})
+            else:
+                print(f"  -> SKIP (name too short after cleanup)")
             continue
 
         # Tag tax/service charge lines
@@ -287,6 +340,10 @@ def run_ocr(image_bytes):
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
     img = img.convert('RGB')
+
+    # Preprocess: improve contrast and sharpen for better OCR accuracy
+    img = ImageEnhance.Contrast(img).enhance(1.5)
+    img = img.filter(ImageFilter.SHARPEN)
 
     # Try original orientation
     all_items, all_lines = _ocr_image(img)
