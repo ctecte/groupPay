@@ -1,15 +1,21 @@
 """
-Receipt OCR module using PaddleOCR.
-Extracts line items (name, price, qty) from receipt images.
+Receipt OCR module.
+Primary: Gemini Flash vision API for accurate receipt extraction.
+Fallback: PaddleOCR + regex parsing when Gemini is unavailable.
 """
 
+import base64
 import io
+import json
 import os
 import re
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 
+import requests
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 
 # Single-worker process pool — model loads once in the subprocess and stays warm
@@ -330,12 +336,74 @@ def _ocr_image(img):
     return parse_receipt_lines(lines), lines
 
 
+def _gemini_ocr(image_bytes):
+    """Extract receipt items using Gemini Flash vision API."""
+    if not GEMINI_API_KEY:
+        return None
+
+    b64 = base64.b64encode(image_bytes).decode()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                {"text": (
+                    "Extract all food/drink items from this receipt image. "
+                    "Return ONLY valid JSON with this exact structure, no markdown:\n"
+                    '{"items": [{"name": "Item Name", "price": 9.90, "qty": 1}], '
+                    '"charges": [{"name": "GST 9%", "price": 1.50}], '
+                    '"charges_included": false}\n\n'
+                    "Rules:\n"
+                    "- items: individual food/drink items with name, unit price, quantity\n"
+                    "- charges: tax, GST, service charge lines (NOT food items)\n"
+                    "- charges_included: true if the grand total equals the food subtotal "
+                    "(meaning charges are already in menu prices and shown for info only, "
+                    "often in parentheses like '(9% GST : $3.68)'). "
+                    "false if grand total = subtotal + charges (charges added on top)\n"
+                    "- Skip sub-items that are part of a set meal (e.g. rice, salad that come with a set)\n"
+                    "- Skip headers, footers, payment method lines\n"
+                    "- Use the unit price, not the line total for multi-qty items"
+                )}
+            ]
+        }],
+        "generationConfig": {"temperature": 0}
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 429:
+            print("[GEMINI] Rate limited, falling back to PaddleOCR")
+            return None
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        # Strip markdown code fences if present
+        text = re.sub(r'^```json\s*', '', text.strip())
+        text = re.sub(r'\s*```$', '', text.strip())
+        result = json.loads(text)
+        # Validate structure
+        items = result.get("items", [])
+        charges = result.get("charges", [])
+        charges_included = result.get("charges_included", False)
+        if not items:
+            print("[GEMINI] No items returned, falling back to PaddleOCR")
+            return None
+        print(f"[GEMINI] Extracted {len(items)} items, {len(charges)} charges")
+        return {"items": items, "charges": charges, "charges_included": charges_included}
+    except Exception as e:
+        print(f"[GEMINI] Failed: {e}, falling back to PaddleOCR")
+        return None
+
+
 def run_ocr(image_bytes):
     """
     Run OCR on receipt image bytes.
     Returns dict with items, charges, charges_included.
-    Tries original orientation and 90° rotation, picks the best result.
+    Primary: Gemini Flash. Fallback: PaddleOCR with rotation/preprocessing.
     """
+    # Try Gemini first
+    gemini_result = _gemini_ocr(image_bytes)
+    if gemini_result:
+        return gemini_result
     # Fix EXIF orientation
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)

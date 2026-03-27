@@ -545,9 +545,6 @@ def handle_qr_whisper(call):
         bot.answer_callback_query(call.id, "Participant not found.", show_alert=True)
         return
 
-    payee_phone = session.get("payee_phone", "")
-    phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
-
     bot.answer_callback_query(call.id, "🔓 QR code unlocked!")
 
     # Mark whisper as read
@@ -559,10 +556,10 @@ def handle_qr_whisper(call):
     try:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("📲 Open PayNow QR", url=qr_page_url))
+        payee_mention = _mention(session["payee"], chat_id=call.message.chat.id)
         bot.edit_message_text(
             f"💸 {p_mention} owes <b>${participant['amount']}</b>\n"
-            f"💰 Pay to: <b>{session['payee']}</b>\n"
-            f"📲 PayNow: <b>{phone_display}</b>\n\n"
+            f"💰 Pay to: {payee_mention}\n\n"
             f"👇 Tap below to view your QR code",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,

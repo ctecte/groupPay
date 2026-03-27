@@ -76,6 +76,9 @@ fi
 export WEBAPP_URL
 echo "Tunnel: $WEBAPP_URL"
 
+# Load env vars (API keys etc.)
+[ -f .env ] && export $(grep -v '^#' .env | xargs)
+
 # Start bot
 WEBAPP_URL="$WEBAPP_URL" nohup python -u bot.py > bot.log 2>&1 &
 sleep 3
