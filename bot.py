@@ -98,6 +98,7 @@ def api_create_session():
         thread_id=data.get("thread_id"),
         payee_phone=data.get("payee_phone"),
         payee_amount=data.get("payee_amount"),
+        payee_telegram_id=data.get("payee_telegram_id"),
     )
 
     # Announce in group chat if chat_id provided
@@ -110,7 +111,10 @@ def api_create_session():
     if chat_id:
         try:
             cid = int(chat_id)
-            session_url = f"{WEBAPP_URL}?session={session['id']}"
+            # Build session URL with members so the frontend can identify the viewer
+            base_url = _build_webapp_url(cid, int(thread_id) if thread_id else None)
+            sep = "&" if "?" in base_url else "?"
+            session_url = f"{base_url}{sep}session={session['id']}"
             print(f"[BOT] Sending group message to chat {cid} thread {thread_id}")
 
             # Build breakdown lines — include payee's share
@@ -192,6 +196,12 @@ def api_update_status(session_id, name):
     data = request.json
     if not data or "status" not in data:
         return jsonify({"error": "Missing status"}), 400
+    # Only the payee can mark payments — verify by Telegram ID
+    caller_tid = data.get("telegram_id")
+    if caller_tid:
+        session = db.get_session(session_id)
+        if session and session.get("payee_telegram_id") and str(caller_tid) != str(session["payee_telegram_id"]):
+            return jsonify({"error": "Only the payee can mark payments"}), 403
     ok = db.update_participant_status(session_id, name, data["status"])
     if not ok:
         return jsonify({"error": "Participant not found"}), 404
@@ -267,7 +277,10 @@ def api_remind(session_id):
                 for p in unpaid
             )
             payee_mention = _mention(session["payee"], chat_id=cid)
-            session_url = f"{WEBAPP_URL}?session={session_id}"
+            thread_id = session.get("thread_id")
+            base_url = _build_webapp_url(cid, int(thread_id) if thread_id else None)
+            sep = "&" if "?" in base_url else "?"
+            session_url = f"{base_url}{sep}session={session_id}"
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("💰 View Split", url=session_url))
             bot.send_message(

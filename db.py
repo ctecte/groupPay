@@ -24,6 +24,7 @@ def init_db():
             event_name TEXT NOT NULL,
             bill_amount TEXT NOT NULL,
             payee TEXT NOT NULL,
+            payee_telegram_id TEXT,
             payee_phone TEXT,
             payee_amount TEXT,
             even_split INTEGER NOT NULL DEFAULT 1,
@@ -50,7 +51,7 @@ def init_db():
     """)
     conn.commit()
     # Migrate: add columns if missing (for existing DBs)
-    for col, coltype in [("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT")]:
+    for col, coltype in [("payee_telegram_id", "TEXT"), ("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
             conn.commit()
@@ -70,13 +71,14 @@ def create_session(event_name: str, bill_amount: str, payee: str,
                    chat_id: str | None = None,
                    thread_id: str | None = None,
                    payee_phone: str | None = None,
-                   payee_amount: str | None = None) -> dict:
+                   payee_amount: str | None = None,
+                   payee_telegram_id: str | None = None) -> dict:
     session_id = uuid.uuid4().hex[:12]
     now = datetime.utcnow().isoformat()
     conn = _connect()
     conn.execute(
-        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_phone, payee_amount, even_split, chat_id, thread_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (session_id, event_name, bill_amount, payee, payee_phone, payee_amount, int(even_split), chat_id, thread_id, now),
+        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, even_split, chat_id, thread_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (session_id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, int(even_split), chat_id, thread_id, now),
     )
     for p in participants:
         payment_ref = f"GP-{uuid.uuid4().hex[:4].upper()}"

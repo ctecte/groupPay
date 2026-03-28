@@ -63,6 +63,7 @@ export default function GroupPayPrototype() {
   // Telegram state
   const [isTMA, setIsTMA] = useState(false);
   const [myTelegramId, setMyTelegramId] = useState<string | null>(null);
+  const [sessionPayeeTid, setSessionPayeeTid] = useState<string | null>(null);
   const [viewerName, setViewerName] = useState<string | null>(null); // The actual person viewing (from Telegram)
 
   // Known group members from bot (parsed from URL ?members=Name1:id1,Name2:id2)
@@ -106,6 +107,7 @@ export default function GroupPayPrototype() {
         setEventName(session.event_name);
         setBillAmount(session.bill_amount);
         setCurrentUser(session.payee);
+        if (session.payee_telegram_id) setSessionPayeeTid(session.payee_telegram_id);
         setEvenSplit(session.even_split);
         const names = session.participants.map(p => p.name);
         setParticipants(names);
@@ -161,9 +163,11 @@ export default function GroupPayPrototype() {
   // Participants excluding the payer
   const otherParticipants = participants.filter(p => p.trim() && !isPayerParticipant(p));
 
-  // Check if the person viewing is the payee (by Telegram ID first, then name)
+  // Check if the person viewing is the payee
   const isViewerThePayee = (() => {
-    // By Telegram ID (most reliable)
+    // By Telegram ID against stored session payee ID (most reliable for loaded sessions)
+    if (myTelegramId && sessionPayeeTid && myTelegramId === sessionPayeeTid) return true;
+    // By Telegram ID against resolved payee ID (for session creator flow)
     if (myTelegramId && payerTelegramId && myTelegramId === payerTelegramId) return true;
     // Fallback: viewer name matches payee name (for session creator before confirming)
     if (viewerName && viewerName === currentUser) return true;
@@ -277,7 +281,7 @@ export default function GroupPayPrototype() {
     if (!sessionId || !selectedPayer) return;
     setVerifyingPayment(true);
     try {
-      await updatePaymentStatus(sessionId, selectedPayer, 'paid');
+      await updatePaymentStatus(sessionId, selectedPayer, 'paid', myTelegramId || undefined);
       confirmPayment(selectedPayer);
       setVerifyingPayment(false);
       setScreenshotUploaded(false);
@@ -323,7 +327,7 @@ export default function GroupPayPrototype() {
       updated[p] = 'paid';
       newHistory.push({ name: p, amount: getResolvedAmount(p), time: new Date().toLocaleTimeString('en-SG', { hour: '2-digit', minute: '2-digit', hour12: false }) });
       if (sessionId) {
-        try { await updatePaymentStatus(sessionId, p, 'paid'); } catch {}
+        try { await updatePaymentStatus(sessionId, p, 'paid', myTelegramId || undefined); } catch {}
       }
     }
     setPaymentStatuses(updated);
@@ -419,6 +423,7 @@ export default function GroupPayPrototype() {
         payee: currentUser,
         payee_phone: payeePhone,
         payee_amount: getResolvedAmount(currentUser),
+        payee_telegram_id: myTelegramId || undefined,
         even_split: !!evenSplit,
         participants: participantData,
         chat_id: chatId,
@@ -1662,16 +1667,16 @@ export default function GroupPayPrototype() {
                 <div className="space-y-3 mb-4">
                   {otherParticipants.map((participant) => {
                     const status = paymentStatuses[participant];
-                    const isViewerPayee = isViewerThePayee;
+                    const canManagePayments = isViewerThePayee;
                     return (
                     <div key={participant} className={`rounded-xl p-4 flex items-center justify-between border transition-all ${status === 'paid' ? 'bg-green-500/5 border-green-500/20' : status === 'self-confirmed' ? 'bg-amber-500/5 border-amber-500/20' : 'bg-white/5 border-white/10'}`}>
                       <div className="flex items-center gap-3">
-                        {isViewerPayee ? (
+                        {canManagePayments ? (
                           <button
                             onClick={async () => {
                               if (status !== 'paid') {
                                 if (sessionId) {
-                                  try { await updatePaymentStatus(sessionId, participant, 'paid'); } catch {}
+                                  try { await updatePaymentStatus(sessionId, participant, 'paid', myTelegramId || undefined); } catch {}
                                 }
                                 confirmPayment(participant);
                               }
@@ -1722,9 +1727,9 @@ export default function GroupPayPrototype() {
                   })}
                 </div>
 
-                {!allPaid() && isViewerThePayee && (
+                {!allPaid() && (
                   <div className="space-y-2 mb-4">
-                    {totalParticipants - paidCount > 1 && (
+                    {isViewerThePayee && totalParticipants - paidCount > 1 && (
                       <button onClick={markAllAsPaid} className="w-full bg-green-500/10 hover:bg-green-500/20 border border-green-400/30 text-green-300 px-4 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all">
                         <CheckCircle size={16} />
                         Mark All as Paid

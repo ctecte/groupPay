@@ -23,6 +23,7 @@ export async function createSession(data: {
   payee: string;
   payee_phone?: string;
   payee_amount?: string;
+  payee_telegram_id?: string;
   even_split: boolean;
   participants: { name: string; amount: string; telegram_id?: string }[];
   chat_id?: string;
@@ -47,13 +48,14 @@ export async function updatePaymentStatus(
   sessionId: string,
   participantName: string,
   status: 'paid' | 'pending',
+  telegramId?: string,
 ): Promise<void> {
   const res = await fetch(
     `${API_BASE}/sessions/${sessionId}/participants/${encodeURIComponent(participantName)}/status`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, telegram_id: telegramId }),
     },
   );
   if (!res.ok) throw new Error(`Failed to update status: ${res.statusText}`);
