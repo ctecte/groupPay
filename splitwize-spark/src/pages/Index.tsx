@@ -1609,23 +1609,33 @@ export default function GroupPayPrototype() {
               </div>
               {autoRemindHours && (
                 <div className="bg-orange-500/10 rounded-lg p-3 border border-orange-400/20 text-orange-200 text-xs">
-                  Reminders will repeat every {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : `${autoRemindHours} hours`} until everyone has paid.
+                  Reminders will repeat every {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`} until everyone has paid.
                 </div>
               )}
             </div>
 
-            <button
-              onClick={async () => {
-                if (autoRemindHours && sessionId) {
-                  try { await setAutoRemind(sessionId, autoRemindHours); } catch {}
-                }
-                setStep('overview');
-              }}
-              className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
-            >
-              <span>{autoRemindHours ? 'Set Reminder & Continue' : 'Skip'}</span>
-              <ArrowRight size={20} />
-            </button>
+            {autoRemindHours ? (
+              <button
+                onClick={async () => {
+                  if (sessionId) {
+                    try { await setAutoRemind(sessionId, autoRemindHours); } catch {}
+                  }
+                  setStep('overview');
+                }}
+                className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
+              >
+                <span>Set Reminder & Continue</span>
+                <ArrowRight size={20} />
+              </button>
+            ) : (
+              <button
+                onClick={() => setStep('overview')}
+                className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
+              >
+                <span>No Reminder</span>
+                <ArrowRight size={20} />
+              </button>
+            )}
           </div>
         )}
 
