@@ -427,7 +427,10 @@ def api_qr(session_id, name):
     from datetime import datetime
     date_str = datetime.utcnow().strftime("%Y%m%d")
     event_clean = session["event_name"].replace(" ", "_")[:20]
-    filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
+    # Sanitize filename to ASCII only (emoji/unicode chars break HTTP headers)
+    name_clean = name.encode("ascii", "ignore").decode("ascii").strip() or "user"
+    event_clean = event_clean.encode("ascii", "ignore").decode("ascii").strip() or "event"
+    filename = f"PayNow_QR_{name_clean}_{event_clean}_{date_str}.png"
     response = send_file(buf, mimetype="image/png", download_name=filename)
     response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
     return response
@@ -449,7 +452,9 @@ def api_pay_page(session_id, name):
     from datetime import datetime
     date_str = datetime.utcnow().strftime("%Y%m%d")
     event_clean = session["event_name"].replace(" ", "_")[:20]
-    filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
+    name_clean = name.encode("ascii", "ignore").decode("ascii").strip() or "user"
+    event_clean = event_clean.encode("ascii", "ignore").decode("ascii").strip() or "event"
+    filename = f"PayNow_QR_{name_clean}_{event_clean}_{date_str}.png"
 
     payment_ref = participant.get("payment_ref", "")
     is_paid = participant["status"] == "paid"
