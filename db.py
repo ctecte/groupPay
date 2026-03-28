@@ -30,6 +30,8 @@ def init_db():
             even_split INTEGER NOT NULL DEFAULT 1,
             chat_id TEXT,
             thread_id TEXT,
+            poll_id TEXT,
+            poll_msg_id TEXT,
             remind_after_hours REAL,
             remind_at TEXT,
             last_reminded_at TEXT,
@@ -51,7 +53,7 @@ def init_db():
     """)
     conn.commit()
     # Migrate: add columns if missing (for existing DBs)
-    for col, coltype in [("payee_telegram_id", "TEXT"), ("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT")]:
+    for col, coltype in [("payee_telegram_id", "TEXT"), ("poll_id", "TEXT"), ("poll_msg_id", "TEXT"), ("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
             conn.commit()
@@ -142,6 +144,35 @@ def save_whisper_msg_id(session_id: str, name: str, msg_id: str) -> bool:
     ok = cur.rowcount > 0
     conn.close()
     return ok
+
+
+def save_poll_info(session_id: str, poll_id: str, poll_msg_id: str) -> bool:
+    conn = _connect()
+    cur = conn.execute(
+        "UPDATE sessions SET poll_id=?, poll_msg_id=? WHERE id=?",
+        (poll_id, poll_msg_id, session_id),
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def get_session_by_poll(poll_id: str) -> dict | None:
+    conn = _connect()
+    row = conn.execute("SELECT * FROM sessions WHERE poll_id=?", (poll_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    session = dict(row)
+    session["even_split"] = bool(session["even_split"])
+    parts = conn.execute(
+        "SELECT name, telegram_id, amount, status, whisper_read, screenshot_path, payment_ref, whisper_msg_id FROM participants WHERE session_id=?",
+        (session["id"],),
+    ).fetchall()
+    session["participants"] = [dict(p) for p in parts]
+    conn.close()
+    return session
 
 
 def set_auto_remind(session_id: str, hours: float) -> bool:

@@ -171,6 +171,31 @@ def api_create_session():
                     print(f"[BOT] Whisper QR button sent for {p['name']} (msg_id={sent_msg.message_id})")
                 except Exception as e:
                     print(f"[BOT ERROR] Whisper for {p['name']} failed: {e}")
+
+            # Send payment confirmation poll — only payee's votes count
+            try:
+                participant_names = [p["name"] for p in data["participants"]]
+                if participant_names:
+                    payee_tid = data.get("payee_telegram_id")
+                    poll_payee_mention = _mention(data["payee"], payee_tid, cid)
+                    bot.send_message(
+                        cid,
+                        f"📊 Only {poll_payee_mention}'s votes count — tick off who has paid you back.",
+                        parse_mode="HTML",
+                        **tid_kwargs,
+                    )
+                    poll_msg = bot.send_poll(
+                        cid,
+                        f"Who has paid for {data['event_name']}?",
+                        options=participant_names,
+                        is_anonymous=False,
+                        allows_multiple_answers=True,
+                        **tid_kwargs,
+                    )
+                    db.save_poll_info(session["id"], poll_msg.poll.id, str(poll_msg.message_id))
+                    print(f"[BOT] Payment poll sent (poll_id={poll_msg.poll.id})")
+            except Exception as e:
+                print(f"[BOT ERROR] Poll failed: {e}")
         except Exception as e:
             print(f"[BOT ERROR] Failed to send group/DM messages: {e}")
 
@@ -598,6 +623,53 @@ def _make_keyboard(msg) -> types.InlineKeyboardMarkup:
             url=url,
         ))
     return kb
+
+
+@bot.poll_answer_handler()
+def handle_poll_answer(poll_answer):
+    """Handle poll votes — only the payee's votes count as payment confirmation."""
+    poll_id = poll_answer.poll_id
+    voter_id = poll_answer.user.id
+    selected = poll_answer.option_ids  # list of selected option indices
+
+    session = db.get_session_by_poll(poll_id)
+    if not session:
+        return
+
+    # Only the payee can confirm payments via poll
+    payee_tid = session.get("payee_telegram_id")
+    if not payee_tid or str(voter_id) != str(payee_tid):
+        print(f"[POLL] Ignoring vote from {poll_answer.user.first_name} (id={voter_id}) — not the payee")
+        return
+
+    participant_names = [p["name"] for p in session["participants"]]
+    chat_id = session.get("chat_id")
+    cid = int(chat_id) if chat_id else None
+    tid_kwargs = {}
+    if session.get("thread_id"):
+        tid_kwargs["message_thread_id"] = int(session["thread_id"])
+
+    for idx in selected:
+        if idx < len(participant_names):
+            name = participant_names[idx]
+            participant = next((p for p in session["participants"] if p["name"] == name), None)
+            if participant and participant["status"] != "paid":
+                db.update_participant_status(session["id"], name, "paid")
+                print(f"[POLL] Payee confirmed {name} as paid")
+
+                # Edit whisper message to show paid
+                if participant.get("whisper_msg_id") and cid:
+                    tid = participant.get("telegram_id")
+                    p_mention = _mention(name, tid, cid)
+                    try:
+                        bot.edit_message_text(
+                            f"✅ {p_mention} paid <b>${participant['amount']}</b> — confirmed by payee",
+                            chat_id=cid,
+                            message_id=int(participant["whisper_msg_id"]),
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        print(f"[POLL] Failed to edit whisper for {name}: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("qr:"))
