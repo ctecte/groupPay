@@ -155,7 +155,7 @@ def api_create_session():
                         callback_data=callback_id,
                     ))
                     p_mention = _mention(p["name"], tid, cid)
-                    bot.send_message(
+                    sent_msg = bot.send_message(
                         cid,
                         f"💸 {p_mention} owes <b>${p['amount']}</b>\n"
                         f"🔒 Only {p_mention} can reveal their PayNow QR code.",
@@ -163,7 +163,8 @@ def api_create_session():
                         reply_markup=whisper_kb,
                         **tid_kwargs,
                     )
-                    print(f"[BOT] Whisper QR button sent for {p['name']}")
+                    db.save_whisper_msg_id(session["id"], p["name"], str(sent_msg.message_id))
+                    print(f"[BOT] Whisper QR button sent for {p['name']} (msg_id={sent_msg.message_id})")
                 except Exception as e:
                     print(f"[BOT ERROR] Whisper for {p['name']} failed: {e}")
         except Exception as e:
@@ -177,6 +178,12 @@ def api_get_session(session_id):
     session = db.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
+    # Add screenshot URLs for participants that have uploaded
+    for p in session["participants"]:
+        if p.get("screenshot_path"):
+            p["screenshot_url"] = f"/api/sessions/{session_id}/participants/{quote(p['name'])}/screenshot"
+        else:
+            p["screenshot_url"] = None
     return jsonify(session)
 
 
@@ -201,9 +208,43 @@ def api_upload_screenshot(session_id, name):
     filepath = os.path.join(UPLOAD_DIR, filename)
     f.save(filepath)
     db.save_screenshot_path(session_id, name, filepath)
-    # Auto-mark as paid on screenshot upload
     db.update_participant_status(session_id, name, "paid")
+
+    # Edit the original whisper message to show paid status
+    session = db.get_session(session_id)
+    if session:
+        participant = next((p for p in session["participants"] if p["name"] == name), None)
+        if participant and participant.get("whisper_msg_id"):
+            chat_id = session.get("chat_id")
+            if chat_id:
+                tid = participant.get("telegram_id")
+                p_mention = _mention(name, tid, chat_id)
+                try:
+                    bot.edit_message_text(
+                        f"✅ {p_mention} paid <b>${participant['amount']}</b> — screenshot submitted",
+                        chat_id=chat_id,
+                        message_id=int(participant["whisper_msg_id"]),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    print(f"[BOT] Failed to edit whisper message: {e}")
+
     return jsonify({"ok": True, "path": filepath})
+
+
+@app.route("/api/sessions/<session_id>/participants/<name>/screenshot", methods=["GET"])
+def api_get_screenshot(session_id, name):
+    """Serve a participant's payment screenshot."""
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    participant = next((p for p in session["participants"] if p["name"] == name), None)
+    if not participant or not participant.get("screenshot_path"):
+        return jsonify({"error": "No screenshot"}), 404
+    path = participant["screenshot_path"]
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+    return send_file(path, mimetype="image/jpeg")
 
 
 @app.route("/api/sessions/<session_id>/remind", methods=["POST"])
@@ -243,6 +284,24 @@ def api_remind(session_id):
         except Exception as e:
             print(f"[BOT ERROR] Reminder failed: {e}")
     return jsonify({"ok": True, "reminded": [p["name"] for p in unpaid]})
+
+
+@app.route("/api/sessions/<session_id>/auto-remind", methods=["POST"])
+def api_auto_remind(session_id):
+    """Set or cancel auto-remind for a session."""
+    data = request.json
+    if not data:
+        return jsonify({"error": "Missing JSON body"}), 400
+    hours = data.get("hours")
+    if hours is None:
+        # Cancel
+        db.cancel_auto_remind(session_id)
+        return jsonify({"ok": True, "auto_remind": None})
+    hours = float(hours)
+    if hours < 6:
+        return jsonify({"error": "Minimum reminder interval is 6 hours"}), 400
+    db.set_auto_remind(session_id, hours)
+    return jsonify({"ok": True, "auto_remind_hours": hours})
 
 
 @app.route("/api/ocr", methods=["POST"])
@@ -340,6 +399,7 @@ def api_qr(session_id, name):
             phone=payee_phone,
             amount=participant["amount"],
             payee_name=session["payee"],
+            reference=participant.get("payment_ref", ""),
         )
     else:
         qr_data = (
@@ -378,6 +438,9 @@ def api_pay_page(session_id, name):
     event_clean = session["event_name"].replace(" ", "_")[:20]
     filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
 
+    payment_ref = participant.get("payment_ref", "")
+    is_paid = participant["status"] == "paid"
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -400,19 +463,25 @@ def api_pay_page(session_id, name):
   .btn {{ display: block; width: 100%; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: 600; text-decoration: none; text-align: center; transition: all 0.2s; cursor: pointer; border: none; }}
   .btn-primary {{ background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; margin-bottom: 12px; }}
   .btn-primary:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(59,130,246,0.4); }}
-  .btn-secondary {{ background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); }}
-  .btn-secondary:hover {{ background: rgba(255,255,255,0.15); }}
-  .btn-confirm {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; }}
-  .btn-confirm:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(34,197,94,0.4); }}
-  .btn-confirm:disabled {{ transform: none; box-shadow: none; }}
-  .btn-pending {{ background: linear-gradient(135deg, #f59e0b, #d97706); }}
+  .btn-upload {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; position: relative; overflow: hidden; }}
+  .btn-upload:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(34,197,94,0.4); }}
+  .btn-upload input {{ position: absolute; inset: 0; opacity: 0; cursor: pointer; }}
+  .btn-paid {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; opacity: 0.9; }}
+  .ref {{ background: rgba(255,255,255,0.08); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px; font-size: 12px; color: rgba(255,255,255,0.5); }}
+  .ref code {{ color: #4ade80; font-weight: 600; font-family: 'SF Mono', monospace; }}
   .event {{ color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 16px; }}
+  .status-msg {{ padding: 12px; border-radius: 10px; margin-top: 12px; font-size: 14px; }}
+  .status-ok {{ background: rgba(34,197,94,0.15); border: 1px solid rgba(34,197,94,0.3); color: #4ade80; }}
+  .status-err {{ background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: #f87171; }}
+  .spinner {{ display: inline-block; width: 18px; height: 18px; border: 2px solid white; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 8px; }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="title">PayNow Payment</div>
   <div class="amount">${participant['amount']}</div>
+  {'<div class="status-msg status-ok">✅ Payment screenshot submitted</div>' if is_paid else f"""
   <div class="qr-wrap">
     <img src="{qr_img_url}" alt="PayNow QR Code">
   </div>
@@ -421,32 +490,45 @@ def api_pay_page(session_id, name):
     <div class="row"><span class="label">PayNow</span><span class="value">{phone_display}</span></div>
     <div class="row"><span class="label">Amount</span><span class="value">${participant['amount']}</span></div>
     <div class="row"><span class="label">Event</span><span class="value">{session['event_name']}</span></div>
+    <div class="row"><span class="label">Ref</span><span class="value">{payment_ref}</span></div>
   </div>
+  <div class="ref">Include ref <code>{payment_ref}</code> in your PayNow comment</div>
   <a href="{qr_img_url}" download="{filename}" class="btn btn-primary">📥 Download QR Image</a>
-  <button id="confirm-btn" class="btn btn-confirm" onclick="confirmPayment()" {'' if participant.get('whisper_read') else 'disabled style="opacity:0.4;cursor:not-allowed"'}>
-    {('✅ Payment Confirmed' if participant['status'] == 'paid' else '⏳ Awaiting Payee Confirmation' if participant['status'] == 'self-confirmed' else "✅ I've Paid")}
-  </button>
+  <div id="upload-area">
+    <label class="btn btn-upload" id="upload-btn">
+      📸 Upload Payment Screenshot
+      <input type="file" accept="image/*" onchange="uploadScreenshot(this)">
+    </label>
+  </div>
+  <div id="status"></div>
+  """}
   <div class="event">GroupPay — {session['event_name']}</div>
 </div>
 <script>
-async function confirmPayment() {{
-  const btn = document.getElementById('confirm-btn');
-  if (btn.disabled) return;
-  btn.disabled = true;
-  btn.textContent = 'Confirming...';
+async function uploadScreenshot(input) {{
+  const file = input.files[0];
+  if (!file) return;
+  const btn = document.getElementById('upload-btn');
+  const status = document.getElementById('status');
+  btn.innerHTML = '<span class="spinner"></span>Uploading...';
+  const formData = new FormData();
+  formData.append('screenshot', file);
   try {{
-    const res = await fetch('/api/sessions/{session_id}/participants/{quote(name)}/self-confirm', {{method: 'POST'}});
+    const res = await fetch('/api/sessions/{session_id}/participants/{quote(name)}/screenshot', {{
+      method: 'POST',
+      body: formData,
+    }});
     const data = await res.json();
     if (res.ok) {{
-      btn.textContent = '⏳ Awaiting Payee Confirmation';
-      btn.classList.add('btn-pending');
+      btn.outerHTML = '<div class="btn btn-paid">✅ Screenshot Submitted</div>';
+      status.innerHTML = '<div class="status-msg status-ok">Payment recorded — you\\'re all set!</div>';
     }} else {{
-      btn.textContent = data.error || 'Error';
-      btn.disabled = false;
+      status.innerHTML = '<div class="status-msg status-err">' + (data.error || 'Upload failed') + '</div>';
+      btn.innerHTML = '📸 Upload Payment Screenshot<input type="file" accept="image/*" onchange="uploadScreenshot(this)">';
     }}
   }} catch {{
-    btn.textContent = 'Error — try again';
-    btn.disabled = false;
+    status.innerHTML = '<div class="status-msg status-err">Upload failed — try again</div>';
+    btn.innerHTML = '📸 Upload Payment Screenshot<input type="file" accept="image/*" onchange="uploadScreenshot(this)">';
   }}
 }}
 </script>
@@ -662,6 +744,51 @@ def handle_webapp_data(msg):
 # Main
 # ---------------------------------------------------------------------------
 
+def _auto_remind_loop():
+    """Background loop: check for due auto-reminders every 5 minutes."""
+    import time as _time
+    while True:
+        try:
+            due = db.get_due_reminders()
+            for session in due:
+                chat_id = session.get("chat_id")
+                if not chat_id:
+                    continue
+                cid = int(chat_id)
+                tid_kwargs = {}
+                if session.get("thread_id"):
+                    tid_kwargs["message_thread_id"] = int(session["thread_id"])
+                unpaid = [p for p in session["participants"] if p["status"] != "paid"]
+                if not unpaid:
+                    continue
+                try:
+                    names = "\n".join(
+                        f"  • {_mention(p['name'], p.get('telegram_id'), cid)} — <b>${p['amount']}</b>"
+                        for p in unpaid
+                    )
+                    payee_mention = _mention(session["payee"], chat_id=cid)
+                    session_url = f"{WEBAPP_URL}?session={session['id']}"
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton("💰 View Split", url=session_url))
+                    bot.send_message(
+                        cid,
+                        f"🔔 <b>Auto-Reminder</b>\n\n"
+                        f"For <b>{session['event_name']}</b> organized by {payee_mention}:\n\n"
+                        f"{names}\n\n"
+                        f"Please pay soon! 🙏",
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                        **tid_kwargs,
+                    )
+                    print(f"[AUTO-REMIND] Sent for session {session['id']} to chat {cid} ({len(unpaid)} unpaid)")
+                    db.reschedule_reminder(session["id"])
+                except Exception as e:
+                    print(f"[AUTO-REMIND ERROR] Session {session['id']}: {e}")
+        except Exception as e:
+            print(f"[AUTO-REMIND ERROR] Loop: {e}")
+        _time.sleep(300)  # Check every 5 minutes
+
+
 if __name__ == "__main__":
     db.init_db()
     print(f"🤖 GroupPay Bot running — Mini App URL: {WEBAPP_URL}")
@@ -673,5 +800,9 @@ if __name__ == "__main__":
         daemon=True,
     )
     flask_thread.start()
+
+    # Run auto-reminder checker in background
+    remind_thread = threading.Thread(target=_auto_remind_loop, daemon=True)
+    remind_thread.start()
 
     bot.infinity_polling(skip_pending=True)

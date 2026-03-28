@@ -80,6 +80,21 @@ export async function sendReminders(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to send reminders: ${res.statusText}`);
 }
 
+export async function setAutoRemind(
+  sessionId: string,
+  hours: number | null,
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/sessions/${sessionId}/auto-remind`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hours !== null ? { hours } : {}),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to set auto-remind: ${res.statusText}`);
+}
+
 export async function scanReceipt(file: File): Promise<{
   items?: { name: string; price: number; qty: number }[];
   charges?: { name: string; price: number }[];

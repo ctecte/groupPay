@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell, X } from 'lucide-react';
-import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt } from '@/lib/api';
+import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt, setAutoRemind } from '@/lib/api';
 
 export default function GroupPayPrototype() {
   const [step, setStep] = useState('start');
@@ -25,8 +25,11 @@ export default function GroupPayPrototype() {
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
   const [screenshotUploaded, setScreenshotUploaded] = useState(false);
+  const [screenshotUrls, setScreenshotUrls] = useState<Record<string, string | null>>({});
+  const [viewingScreenshot, setViewingScreenshot] = useState<string | null>(null);
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [remindersSent, setRemindersSent] = useState<Record<string, string>>({});
+  const [autoRemindHours, setAutoRemindHours] = useState<number | null>(null);
   const [sendingReminder, setSendingReminder] = useState<string | null>(null);
   const [payeePhone, setPayeePhone] = useState(() => {
     // Auto-fill from localStorage if user has paid before
@@ -108,12 +111,15 @@ export default function GroupPayPrototype() {
         setParticipants(names);
         const statuses: Record<string, string> = {};
         const amounts: Record<string, string> = {};
+        const screenshots: Record<string, string | null> = {};
         session.participants.forEach(p => {
           statuses[p.name] = p.status;
           amounts[p.name] = p.amount;
+          screenshots[p.name] = p.screenshot_url || null;
         });
         setPaymentStatuses(statuses);
         setCustomAmounts(amounts);
+        setScreenshotUrls(screenshots);
         setSplitConfirmed(true);
         setStep('overview');
       }).catch(() => {
@@ -388,7 +394,7 @@ export default function GroupPayPrototype() {
 
   const handleConfirmSplit = async () => {
     setSplitConfirmed(true);
-    setStep('overview');
+    setStep('auto-remind-setup');
 
     // Create session via API
     const validParticipants = participants.filter(p => p.trim());
@@ -1553,6 +1559,69 @@ export default function GroupPayPrototype() {
           </div>
         )}
 
+        {/* Auto-Remind Setup — shown right after Send to Group */}
+        {step === 'auto-remind-setup' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
+                <CheckCircle className="text-white" size={28} />
+              </div>
+              <div>
+                <h2 className="text-white text-xl font-bold">Split Sent!</h2>
+                <p className="text-green-300 text-sm">Messages delivered to group</p>
+              </div>
+            </div>
+
+            <div className="bg-white/5 rounded-xl p-5 mb-6 border border-white/10 mt-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Bell className="text-orange-400" size={20} />
+                <h3 className="text-white font-semibold">Auto-Remind Unpaid</h3>
+              </div>
+              <p className="text-blue-200 text-sm mb-4">Automatically nudge anyone who hasn't paid after:</p>
+              <div className="grid grid-cols-3 gap-2 mb-4">
+                {[
+                  { label: '6 hours', hours: 6 },
+                  { label: '12 hours', hours: 12 },
+                  { label: '1 day', hours: 24 },
+                  { label: '3 days', hours: 72 },
+                  { label: '5 days', hours: 120 },
+                  { label: '7 days', hours: 168 },
+                ].map(opt => (
+                  <button
+                    key={opt.hours}
+                    onClick={() => setAutoRemindHours(autoRemindHours === opt.hours ? null : opt.hours)}
+                    className={`px-3 py-2.5 rounded-xl text-sm font-semibold transition-all border ${
+                      autoRemindHours === opt.hours
+                        ? 'bg-orange-500/20 border-orange-400/60 text-orange-300'
+                        : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {autoRemindHours && (
+                <div className="bg-orange-500/10 rounded-lg p-3 border border-orange-400/20 text-orange-200 text-xs">
+                  Reminders will repeat every {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : `${autoRemindHours} hours`} until everyone has paid.
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={async () => {
+                if (autoRemindHours && sessionId) {
+                  try { await setAutoRemind(sessionId, autoRemindHours); } catch {}
+                }
+                setStep('overview');
+              }}
+              className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
+            >
+              <span>{autoRemindHours ? 'Set Reminder & Continue' : 'Skip'}</span>
+              <ArrowRight size={20} />
+            </button>
+          </div>
+        )}
+
         {/* Payment Status Overview */}
         {step === 'overview' && splitConfirmed && (
            <div className="glass rounded-3xl p-8 animate-in">
@@ -1636,7 +1705,12 @@ export default function GroupPayPrototype() {
                       </div>
                       <div className="flex items-center gap-2">
                         {status === 'paid' ? (
-                          <span className="text-green-400 text-xs font-semibold flex items-center gap-1"><CheckCircle size={14} />Verified</span>
+                          <>
+                            {screenshotUrls[participant] && (
+                              <button onClick={() => setViewingScreenshot(screenshotUrls[participant])} className="text-blue-400 text-xs font-semibold flex items-center gap-1 hover:text-blue-300"><Camera size={14} />Proof</button>
+                            )}
+                            <span className="text-green-400 text-xs font-semibold flex items-center gap-1"><CheckCircle size={14} />Paid</span>
+                          </>
                         ) : status === 'self-confirmed' ? (
                           <span className="text-amber-400 text-xs font-semibold flex items-center gap-1"><Clock size={14} />Pending</span>
                         ) : (
@@ -1901,6 +1975,7 @@ export default function GroupPayPrototype() {
           {step === 'split-type' && 'CHOOSE SPLIT TYPE'}
           {step === 'custom-split' && 'CUSTOM SPLIT'}
           {step === 'review-split' && 'REVIEW SPLIT'}
+          {step === 'auto-remind-setup' && 'AUTO-REMIND'}
           {step === 'overview' && 'PAYMENT STATUS'}
           {step === 'qr-display' && 'QR CODE'}
           {step === 'verify-payment' && 'VERIFYING PAYMENT'}
@@ -1908,6 +1983,16 @@ export default function GroupPayPrototype() {
           {step === 'reminder' && 'REMINDERS'}
         </div>
       </div>
+
+      {/* Screenshot viewer modal */}
+      {viewingScreenshot && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onClick={() => setViewingScreenshot(null)}>
+          <div className="relative max-w-lg w-full" onClick={e => e.stopPropagation()}>
+            <button onClick={() => setViewingScreenshot(null)} className="absolute -top-10 right-0 text-white/60 hover:text-white text-sm font-semibold">Close</button>
+            <img src={viewingScreenshot} alt="Payment screenshot" className="w-full rounded-xl border border-white/20" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
