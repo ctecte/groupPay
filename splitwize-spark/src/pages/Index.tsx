@@ -2002,7 +2002,7 @@ export default function GroupPayPrototype() {
       {/* Step Indicator */}
       <div className="max-w-md mx-auto mt-6 text-center">
         <div className="text-blue-300/50 text-xs mono">
-          {step === 'start' && `START | TMA:${isTMA} myTID:${myTelegramId || 'none'} user:${currentUser}`}
+          {step === 'start' && 'START'}
           {step === 'ocr-choice' && 'CHOOSE INPUT METHOD'}
           {step === 'ocr-scan' && 'SCANNING RECEIPT'}
           {step === 'ocr-result' && 'RECEIPT PROCESSED'}
@@ -2014,7 +2014,7 @@ export default function GroupPayPrototype() {
           {step === 'custom-split' && 'CUSTOM SPLIT'}
           {step === 'review-split' && 'REVIEW SPLIT'}
           {step === 'auto-remind-setup' && 'AUTO-REMIND'}
-          {step === 'overview' && `PAYMENT STATUS | TMA:${isTMA} myTID:${myTelegramId || 'none'} payeeTID:${sessionPayeeTid || 'none'} isPayee:${isViewerThePayee}`}
+          {step === 'overview' && 'PAYMENT STATUS'}
           {step === 'qr-display' && 'QR CODE'}
           {step === 'verify-payment' && 'VERIFYING PAYMENT'}
           {step === 'payment-confirmed' && 'PAYMENT CONFIRMED'}
