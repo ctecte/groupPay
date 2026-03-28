@@ -336,8 +336,8 @@ def api_auto_remind(session_id):
         db.cancel_auto_remind(session_id)
         return jsonify({"ok": True, "auto_remind": None})
     hours = float(hours)
-    if hours < 6:
-        return jsonify({"error": "Minimum reminder interval is 6 hours"}), 400
+    if hours <= 0:
+        return jsonify({"error": "Invalid reminder interval"}), 400
     db.set_auto_remind(session_id, hours)
     return jsonify({"ok": True, "auto_remind_hours": hours})
 

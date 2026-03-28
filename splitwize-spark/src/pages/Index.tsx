@@ -1585,6 +1585,8 @@ export default function GroupPayPrototype() {
               <p className="text-blue-200 text-sm mb-4">Automatically nudge anyone who hasn't paid after:</p>
               <div className="grid grid-cols-3 gap-2 mb-4">
                 {[
+                  { label: '1 min', hours: 1/60 },
+                  { label: '5 min', hours: 5/60 },
                   { label: '6 hours', hours: 6 },
                   { label: '12 hours', hours: 12 },
                   { label: '1 day', hours: 24 },
@@ -1630,6 +1632,27 @@ export default function GroupPayPrototype() {
         {/* Payment Status Overview */}
         {step === 'overview' && splitConfirmed && (
            <div className="glass rounded-3xl p-8 animate-in">
+            {/* Identity verification for View Split links */}
+            {!myTelegramId && sessionPayeeTid && knownMembers.length > 0 && (
+              <div className="bg-amber-500/10 rounded-xl p-4 mb-4 border border-amber-400/30">
+                <div className="text-amber-300 text-xs font-semibold mb-2">Are you the payee?</div>
+                <div className="flex flex-wrap gap-2">
+                  {knownMembers.map(m => (
+                    <button
+                      key={m.id || m.name}
+                      onClick={() => {
+                        if (m.id) setMyTelegramId(m.id);
+                        setViewerName(m.name);
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/60 hover:border-amber-400/50 hover:text-white transition-all"
+                    >
+                      {m.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <h2 className="text-white text-xl font-bold mb-1">Payment Status</h2>
             <p className="text-blue-200 text-sm mb-3">
               {paidCount === totalParticipants
@@ -1969,7 +1992,7 @@ export default function GroupPayPrototype() {
       {/* Step Indicator */}
       <div className="max-w-md mx-auto mt-6 text-center">
         <div className="text-blue-300/50 text-xs mono">
-          {step === 'start' && 'START'}
+          {step === 'start' && `START | TMA:${isTMA} myTID:${myTelegramId || 'none'} user:${currentUser}`}
           {step === 'ocr-choice' && 'CHOOSE INPUT METHOD'}
           {step === 'ocr-scan' && 'SCANNING RECEIPT'}
           {step === 'ocr-result' && 'RECEIPT PROCESSED'}
@@ -1981,7 +2004,7 @@ export default function GroupPayPrototype() {
           {step === 'custom-split' && 'CUSTOM SPLIT'}
           {step === 'review-split' && 'REVIEW SPLIT'}
           {step === 'auto-remind-setup' && 'AUTO-REMIND'}
-          {step === 'overview' && 'PAYMENT STATUS'}
+          {step === 'overview' && `PAYMENT STATUS | TMA:${isTMA} myTID:${myTelegramId || 'none'} payeeTID:${sessionPayeeTid || 'none'} isPayee:${isViewerThePayee}`}
           {step === 'qr-display' && 'QR CODE'}
           {step === 'verify-payment' && 'VERIFYING PAYMENT'}
           {step === 'payment-confirmed' && 'PAYMENT CONFIRMED'}
