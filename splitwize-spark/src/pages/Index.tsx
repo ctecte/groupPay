@@ -929,6 +929,29 @@ export default function GroupPayPrototype() {
                 <div className="bg-blue-500/10 rounded-lg px-3 py-2 mb-3 border border-blue-400/20">
                   <p className="text-blue-200 text-xs">The bot can only see members who have <strong className="text-blue-300">messaged</strong> or <strong className="text-blue-300">joined</strong> the group after it was added.</p>
                 </div>
+                {(() => {
+                  const selectableMembers = knownMembers.filter(m => !isPayerParticipant(m.name));
+                  const allSelected = selectableMembers.length > 0 && selectableMembers.every(m => participants.includes(m.name));
+                  return (
+                    <button
+                      onClick={() => {
+                        if (allSelected) {
+                          setParticipants(participants.filter(p => !selectableMembers.some(m => m.name === p)));
+                        } else {
+                          const newNames = selectableMembers.map(m => m.name).filter(n => !participants.includes(n));
+                          setParticipants([...participants.filter(p => p.trim()), ...newNames]);
+                        }
+                      }}
+                      className={`w-full mb-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border ${
+                        allSelected
+                          ? 'bg-blue-500/20 border-blue-400/50 text-blue-300'
+                          : 'bg-white/5 border-white/15 text-white/50 hover:border-white/30'
+                      }`}
+                    >
+                      {allSelected ? 'Deselect All' : 'Select All'}
+                    </button>
+                  );
+                })()}
                 {knownMembers.filter(m => !isPayerParticipant(m.name)).map((member) => {
                   const isSelected = participants.includes(member.name);
                   return (
