@@ -800,7 +800,8 @@ def _auto_remind_loop():
                         **tid_kwargs,
                     )
                     print(f"[AUTO-REMIND] Sent for session {session['id']} to chat {cid} ({len(unpaid)} unpaid)")
-                    db.reschedule_reminder(session["id"])
+                    # One-shot: clear reminder after sending
+                    db.cancel_auto_remind(session["id"])
                 except Exception as e:
                     print(f"[AUTO-REMIND ERROR] Session {session['id']}: {e}")
         except Exception as e:

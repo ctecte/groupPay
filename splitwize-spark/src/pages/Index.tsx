@@ -1582,7 +1582,7 @@ export default function GroupPayPrototype() {
                 <Bell className="text-orange-400" size={20} />
                 <h3 className="text-white font-semibold">Auto-Remind Unpaid</h3>
               </div>
-              <p className="text-blue-200 text-sm mb-4">Automatically nudge anyone who hasn't paid after:</p>
+              <p className="text-blue-200 text-sm mb-4">Send a reminder to the group after:</p>
               <div className="grid grid-cols-3 gap-2 mb-4">
                 {[
                   { label: '1 min', hours: 1/60 },
@@ -1609,7 +1609,7 @@ export default function GroupPayPrototype() {
               </div>
               {autoRemindHours && (
                 <div className="bg-orange-500/10 rounded-lg p-3 border border-orange-400/20 text-orange-200 text-xs">
-                  Reminders will repeat every {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`} until everyone has paid.
+                  Those who haven't paid will be nudged in {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`}.
                 </div>
               )}
             </div>
@@ -1771,6 +1771,16 @@ export default function GroupPayPrototype() {
                     <button onClick={() => setStep('reminder')} className="w-full btn-secondary text-white px-4 py-3 rounded-xl font-semibold flex items-center justify-center gap-2">
                       <Bell size={16} />Send Reminders ({totalParticipants - paidCount} unpaid)
                     </button>
+                    {autoRemindHours ? (
+                      <div className="bg-orange-500/10 rounded-xl p-3 border border-orange-400/20 flex items-center justify-between">
+                        <span className="text-orange-200 text-xs">Nudging unpaid in {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`}</span>
+                        <button onClick={async () => { setAutoRemindHours(null); if (sessionId) try { await setAutoRemind(sessionId, null); } catch {} }} className="text-orange-400 text-xs font-semibold hover:text-orange-300">Cancel</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setStep('auto-remind-setup')} className="w-full bg-orange-500/10 hover:bg-orange-500/15 border border-orange-400/20 text-orange-300 px-4 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all">
+                        <Clock size={16} />Schedule Reminder
+                      </button>
+                    )}
                   </div>
                 )}
               </>
