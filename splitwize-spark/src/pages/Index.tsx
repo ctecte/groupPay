@@ -122,6 +122,7 @@ export default function GroupPayPrototype() {
         setPaymentStatuses(statuses);
         setCustomAmounts(amounts);
         setScreenshotUrls(screenshots);
+        if (session.remind_after_hours) setAutoRemindHours(session.remind_after_hours);
         setSplitConfirmed(true);
         setStep('overview');
       }).catch(() => {
