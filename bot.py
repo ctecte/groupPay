@@ -152,7 +152,7 @@ def api_create_session():
                             if name == p["name"]:
                                 tid = str(uid)
                                 break
-                    callback_id = f"qr:{session['id']}:{p['name']}:{tid or '0'}"
+                    callback_id = f"qr|{session['id']}|{p['name']}|{tid or '0'}"
                     whisper_kb = types.InlineKeyboardMarkup()
                     whisper_kb.add(types.InlineKeyboardButton(
                         "🔒 Show my QR code",
@@ -601,10 +601,11 @@ def _make_keyboard(msg) -> types.InlineKeyboardMarkup:
     return kb
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("qr:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("qr|") or call.data.startswith("qr:"))
 def handle_qr_whisper(call):
     """Handle whisper QR button clicks — only show QR to the intended recipient."""
-    parts = call.data.split(":", 3)  # qr:session_id:name:telegram_id
+    delim = "|" if "|" in call.data else ":"
+    parts = call.data.split(delim, 3)  # qr|session_id|name|telegram_id
     if len(parts) < 4:
         bot.answer_callback_query(call.id, "Invalid QR data.", show_alert=True)
         return

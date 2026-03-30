@@ -134,7 +134,10 @@ export default function GroupPayPrototype() {
     const membersParam = params.get('members');
     if (membersParam) {
       const parsed = membersParam.split(',').map(entry => {
-        const [name, id] = entry.split(':');
+        const lastColon = entry.lastIndexOf(':');
+        if (lastColon === -1) return { name: decodeURIComponent(entry), id: '' };
+        const name = entry.slice(0, lastColon);
+        const id = entry.slice(lastColon + 1);
         return { name: decodeURIComponent(name), id: id || '' };
       }).filter(m => m.name);
       setKnownMembers(parsed);
