@@ -1069,9 +1069,20 @@ export default function GroupPayPrototype() {
             <p className="text-blue-200 text-sm mb-4">Tap people to assign each item. Shared items split evenly.</p>
 
             <div className="text-white/40 text-xs mb-2 font-semibold uppercase tracking-wider">{assignedCount}/{ocrItems.length} items assigned</div>
-            <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mb-5">
+            <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mb-3">
               <div className={`h-full rounded-full transition-all duration-300 ${allAssigned ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${ocrItems.length > 0 ? (assignedCount / ocrItems.length) * 100 : 0}%` }} />
             </div>
+
+            <button
+              onClick={() => {
+                const all: Record<number, string[]> = {};
+                ocrItems.forEach((_, idx) => { all[idx] = [...allPeople]; });
+                setItemAssignments(all);
+              }}
+              className="w-full mb-5 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border bg-white/5 border-white/15 text-white/50 hover:border-blue-400/50 hover:text-blue-300"
+            >
+              Split Everything Evenly
+            </button>
 
             <div className="space-y-4 mb-6 max-h-[50vh] overflow-y-auto">
               {ocrItems.map((item, idx) => {
