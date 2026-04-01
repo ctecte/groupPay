@@ -30,6 +30,7 @@ export default function GroupPayPrototype() {
   const [verifyingPayment, setVerifyingPayment] = useState(false);
   const [remindersSent, setRemindersSent] = useState<Record<string, string>>({});
   const [autoRemindHours, setAutoRemindHours] = useState<number | null>(null);
+  const [showRemindPicker, setShowRemindPicker] = useState(false);
   const [sendingReminder, setSendingReminder] = useState<string | null>(null);
   const [payeePhone, setPayeePhone] = useState(() => {
     // Auto-fill from localStorage if user has paid before
@@ -402,6 +403,8 @@ export default function GroupPayPrototype() {
 
   const handleConfirmSplit = async () => {
     setSplitConfirmed(true);
+    setShowRemindPicker(false);
+    setAutoRemindHours(null);
     setStep('auto-remind-setup');
 
     // Create session via API
@@ -1591,80 +1594,99 @@ export default function GroupPayPrototype() {
           </div>
         )}
 
-        {/* Auto-Remind Setup — shown right after Send to Group */}
-        {step === 'auto-remind-setup' && (
+        {/* Post-Send: Success + Reminder Setup */}
+        {step === 'auto-remind-setup' && (() => {
+          return (
           <div className="glass rounded-3xl p-8 animate-in">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
-                <CheckCircle className="text-white" size={28} />
+            <div className="text-center mb-6">
+              <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center animate-in">
+                <CheckCircle className="text-white" size={40} />
               </div>
-              <div>
-                <h2 className="text-white text-xl font-bold">Split Sent!</h2>
-                <p className="text-green-300 text-sm">Messages delivered to group</p>
-              </div>
+              <h2 className="text-white text-2xl font-bold mb-1">Bill Sent to Group!</h2>
+              <p className="text-green-300 text-sm">QR codes and payment details have been delivered</p>
             </div>
 
-            <div className="bg-white/5 rounded-xl p-5 mb-6 border border-white/10 mt-6">
-              <div className="flex items-center gap-2 mb-4">
+            <div className="bg-white/5 rounded-xl p-5 mb-6 border border-white/10">
+              <div className="flex items-center gap-2 mb-3">
                 <Bell className="text-orange-400" size={20} />
-                <h3 className="text-white font-semibold">Auto-Remind Unpaid</h3>
+                <h3 className="text-white font-semibold">Set a payment reminder?</h3>
               </div>
-              <p className="text-blue-200 text-sm mb-4">Send a reminder to the group after:</p>
-              <div className="grid grid-cols-3 gap-2 mb-4">
-                {[
-                  { label: '1 min', hours: 1/60 },
-                  { label: '5 min', hours: 5/60 },
-                  { label: '6 hours', hours: 6 },
-                  { label: '12 hours', hours: 12 },
-                  { label: '1 day', hours: 24 },
-                  { label: '3 days', hours: 72 },
-                  { label: '5 days', hours: 120 },
-                  { label: '7 days', hours: 168 },
-                ].map(opt => (
+
+              {!showRemindPicker ? (
+                <div className="flex gap-3">
                   <button
-                    key={opt.hours}
-                    onClick={() => setAutoRemindHours(autoRemindHours === opt.hours ? null : opt.hours)}
-                    className={`px-3 py-2.5 rounded-xl text-sm font-semibold transition-all border ${
-                      autoRemindHours === opt.hours
-                        ? 'bg-orange-500/20 border-orange-400/60 text-orange-300'
-                        : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
-                    }`}
+                    onClick={() => setShowRemindPicker(true)}
+                    className="flex-1 bg-orange-500/20 hover:bg-orange-500/30 border border-orange-400/40 text-orange-300 px-4 py-3 rounded-xl text-sm font-semibold transition-all"
                   >
-                    {opt.label}
+                    Yes, remind me
                   </button>
-                ))}
-              </div>
-              {autoRemindHours && (
-                <div className="bg-orange-500/10 rounded-lg p-3 border border-orange-400/20 text-orange-200 text-xs">
-                  Those who haven't paid will be nudged in {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`}.
+                  <button
+                    onClick={() => setStep('overview')}
+                    className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 px-4 py-3 rounded-xl text-sm font-semibold transition-all"
+                  >
+                    No thanks
+                  </button>
                 </div>
+              ) : (
+                <>
+                  <p className="text-blue-200 text-sm mb-3">Nudge those who haven't paid after:</p>
+                  <div className="grid grid-cols-3 gap-2 mb-4">
+                    {[
+                      { label: '1 min', hours: 1/60 },
+                      { label: '5 min', hours: 5/60 },
+                      { label: '6 hours', hours: 6 },
+                      { label: '12 hours', hours: 12 },
+                      { label: '1 day', hours: 24 },
+                      { label: '3 days', hours: 72 },
+                      { label: '5 days', hours: 120 },
+                      { label: '7 days', hours: 168 },
+                    ].map(opt => (
+                      <button
+                        key={opt.hours}
+                        onClick={() => setAutoRemindHours(autoRemindHours === opt.hours ? null : opt.hours)}
+                        className={`px-3 py-2.5 rounded-xl text-sm font-semibold transition-all border ${
+                          autoRemindHours === opt.hours
+                            ? 'bg-orange-500/20 border-orange-400/60 text-orange-300'
+                            : 'bg-white/5 border-white/10 text-white/50 hover:border-white/30'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  {autoRemindHours && (
+                    <div className="bg-orange-500/10 rounded-lg p-3 mb-4 border border-orange-400/20 text-orange-200 text-xs">
+                      Those who haven't paid will be nudged in {autoRemindHours >= 24 ? `${autoRemindHours / 24} day${autoRemindHours > 24 ? 's' : ''}` : autoRemindHours >= 1 ? `${autoRemindHours} hour${autoRemindHours > 1 ? 's' : ''}` : `${Math.round(autoRemindHours * 60)} min`}.
+                    </div>
+                  )}
+                  <button
+                    onClick={async () => {
+                      if (autoRemindHours && sessionId) {
+                        try { await setAutoRemind(sessionId, autoRemindHours); } catch {}
+                      }
+                      setStep('overview');
+                    }}
+                    disabled={!autoRemindHours}
+                    className="w-full btn-primary text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Set Reminder
+                  </button>
+                </>
               )}
             </div>
 
-            {autoRemindHours ? (
-              <button
-                onClick={async () => {
-                  if (sessionId) {
-                    try { await setAutoRemind(sessionId, autoRemindHours); } catch {}
-                  }
-                  setStep('overview');
-                }}
-                className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
-              >
-                <span>Set Reminder & Continue</span>
-                <ArrowRight size={20} />
-              </button>
-            ) : (
+            {!showRemindPicker && (
               <button
                 onClick={() => setStep('overview')}
                 className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
               >
-                <span>No Reminder</span>
+                <span>View Payment Status</span>
                 <ArrowRight size={20} />
               </button>
             )}
           </div>
-        )}
+          );
+        })()}
 
         {/* Payment Status Overview */}
         {step === 'overview' && splitConfirmed && (
