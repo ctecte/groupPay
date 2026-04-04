@@ -21,7 +21,7 @@ import db
 from paynow_qr import generate_paynow_qr_data
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8061320633:AAEFegJpAs281zT4ySk20z2o_SHzh9tg3Rw")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://subfossorial-ritualistically-christene.ngrok-free.dev")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -95,18 +95,27 @@ def api_create_session():
         even_split=data.get("even_split", True),
         participants=data["participants"],
         chat_id=data.get("chat_id"),
+        thread_id=data.get("thread_id"),
         payee_phone=data.get("payee_phone"),
         payee_amount=data.get("payee_amount"),
+        payee_telegram_id=data.get("payee_telegram_id"),
     )
 
     # Announce in group chat if chat_id provided
     chat_id = data.get("chat_id")
-    print(f"[SESSION] Created {session['id']}, chat_id={chat_id}, participants={[p['name'] for p in data['participants']]}")
+    tid_kwargs = {}
+    thread_id = data.get("thread_id")
+    if thread_id:
+        tid_kwargs["message_thread_id"] = int(thread_id)
+    print(f"[SESSION] Created {session['id']}, chat_id={chat_id}, thread_id={thread_id}, participants={[p['name'] for p in data['participants']]}")
     if chat_id:
         try:
             cid = int(chat_id)
-            session_url = f"{WEBAPP_URL}?session={session['id']}"
-            print(f"[BOT] Sending group message to chat {cid}")
+            # Build session URL with members so the frontend can identify the viewer
+            base_url = _build_webapp_url(cid, int(thread_id) if thread_id else None)
+            sep = "&" if "?" in base_url else "?"
+            session_url = f"{base_url}{sep}session={session['id']}"
+            print(f"[BOT] Sending group message to chat {cid} thread {thread_id}")
 
             # Build breakdown lines — include payee's share
             payee_amount = data.get("payee_amount", "0.00")
@@ -130,6 +139,7 @@ def api_create_session():
                 f"💸 <b>Who owes what:</b>\n{breakdown}",
                 parse_mode="HTML",
                 reply_markup=kb,
+                **tid_kwargs,
             )
             print(f"[BOT] Group message sent OK")
 
@@ -142,23 +152,26 @@ def api_create_session():
                             if name == p["name"]:
                                 tid = str(uid)
                                 break
-                    callback_id = f"qr:{session['id']}:{p['name']}:{tid or '0'}"
+                    callback_id = f"qr|{session['id']}|{p['name']}|{tid or '0'}"
                     whisper_kb = types.InlineKeyboardMarkup()
                     whisper_kb.add(types.InlineKeyboardButton(
                         "🔒 Show my QR code",
                         callback_data=callback_id,
                     ))
                     p_mention = _mention(p["name"], tid, cid)
-                    bot.send_message(
+                    sent_msg = bot.send_message(
                         cid,
                         f"💸 {p_mention} owes <b>${p['amount']}</b>\n"
                         f"🔒 Only {p_mention} can reveal their PayNow QR code.",
                         parse_mode="HTML",
                         reply_markup=whisper_kb,
+                        **tid_kwargs,
                     )
-                    print(f"[BOT] Whisper QR button sent for {p['name']}")
+                    db.save_whisper_msg_id(session["id"], p["name"], str(sent_msg.message_id))
+                    print(f"[BOT] Whisper QR button sent for {p['name']} (msg_id={sent_msg.message_id})")
                 except Exception as e:
                     print(f"[BOT ERROR] Whisper for {p['name']} failed: {e}")
+
         except Exception as e:
             print(f"[BOT ERROR] Failed to send group/DM messages: {e}")
 
@@ -170,6 +183,12 @@ def api_get_session(session_id):
     session = db.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
+    # Add screenshot URLs for participants that have uploaded
+    for p in session["participants"]:
+        if p.get("screenshot_path"):
+            p["screenshot_url"] = f"/api/sessions/{session_id}/participants/{quote(p['name'])}/screenshot"
+        else:
+            p["screenshot_url"] = None
     return jsonify(session)
 
 
@@ -178,6 +197,12 @@ def api_update_status(session_id, name):
     data = request.json
     if not data or "status" not in data:
         return jsonify({"error": "Missing status"}), 400
+    # Only the payee can mark payments — verify by Telegram ID
+    caller_tid = data.get("telegram_id")
+    if caller_tid:
+        session = db.get_session(session_id)
+        if session and session.get("payee_telegram_id") and str(caller_tid) != str(session["payee_telegram_id"]):
+            return jsonify({"error": "Only the payee can mark payments"}), 403
     ok = db.update_participant_status(session_id, name, data["status"])
     if not ok:
         return jsonify({"error": "Participant not found"}), 404
@@ -194,9 +219,43 @@ def api_upload_screenshot(session_id, name):
     filepath = os.path.join(UPLOAD_DIR, filename)
     f.save(filepath)
     db.save_screenshot_path(session_id, name, filepath)
-    # Auto-mark as paid on screenshot upload
     db.update_participant_status(session_id, name, "paid")
+
+    # Edit the original whisper message to show paid status
+    session = db.get_session(session_id)
+    if session:
+        participant = next((p for p in session["participants"] if p["name"] == name), None)
+        if participant and participant.get("whisper_msg_id"):
+            chat_id = session.get("chat_id")
+            if chat_id:
+                tid = participant.get("telegram_id")
+                p_mention = _mention(name, tid, chat_id)
+                try:
+                    bot.edit_message_text(
+                        f"✅ {p_mention} paid <b>${participant['amount']}</b> — screenshot submitted",
+                        chat_id=chat_id,
+                        message_id=int(participant["whisper_msg_id"]),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    print(f"[BOT] Failed to edit whisper message: {e}")
+
     return jsonify({"ok": True, "path": filepath})
+
+
+@app.route("/api/sessions/<session_id>/participants/<name>/screenshot", methods=["GET"])
+def api_get_screenshot(session_id, name):
+    """Serve a participant's payment screenshot."""
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    participant = next((p for p in session["participants"] if p["name"] == name), None)
+    if not participant or not participant.get("screenshot_path"):
+        return jsonify({"error": "No screenshot"}), 404
+    path = participant["screenshot_path"]
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+    return send_file(path, mimetype="image/jpeg")
 
 
 @app.route("/api/sessions/<session_id>/remind", methods=["POST"])
@@ -205,6 +264,9 @@ def api_remind(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
     chat_id = session.get("chat_id")
+    tid_kwargs = {}
+    if session.get("thread_id"):
+        tid_kwargs["message_thread_id"] = int(session["thread_id"])
     unpaid = [p for p in session["participants"] if p["status"] != "paid"]
     if not unpaid:
         return jsonify({"ok": True, "reminded": []})
@@ -216,7 +278,10 @@ def api_remind(session_id):
                 for p in unpaid
             )
             payee_mention = _mention(session["payee"], chat_id=cid)
-            session_url = f"{WEBAPP_URL}?session={session_id}"
+            thread_id = session.get("thread_id")
+            base_url = _build_webapp_url(cid, int(thread_id) if thread_id else None)
+            sep = "&" if "?" in base_url else "?"
+            session_url = f"{base_url}{sep}session={session_id}"
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("💰 View Split", url=session_url))
             bot.send_message(
@@ -227,11 +292,109 @@ def api_remind(session_id):
                 f"Please pay soon! 🙏",
                 parse_mode="HTML",
                 reply_markup=kb,
+                **tid_kwargs,
             )
             print(f"[BOT] Reminder sent to group {cid} for {len(unpaid)} unpaid")
         except Exception as e:
             print(f"[BOT ERROR] Reminder failed: {e}")
     return jsonify({"ok": True, "reminded": [p["name"] for p in unpaid]})
+
+
+@app.route("/api/sessions/<session_id>/auto-remind", methods=["POST"])
+def api_auto_remind(session_id):
+    """Set or cancel auto-remind for a session."""
+    data = request.json
+    if not data:
+        return jsonify({"error": "Missing JSON body"}), 400
+    hours = data.get("hours")
+    if hours is None:
+        # Cancel
+        db.cancel_auto_remind(session_id)
+        return jsonify({"ok": True, "auto_remind": None})
+    hours = float(hours)
+    if hours <= 0:
+        return jsonify({"error": "Invalid reminder interval"}), 400
+    db.set_auto_remind(session_id, hours)
+    return jsonify({"ok": True, "auto_remind_hours": hours})
+
+
+@app.route("/api/ocr", methods=["POST"])
+def api_ocr():
+    """Process a receipt image with PaddleOCR and return extracted items."""
+    if "receipt" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    f = request.files["receipt"]
+    image_bytes = f.read()
+    print(f"[OCR] Received image: {len(image_bytes)} bytes")
+    # Debug: save uploaded image for inspection
+    debug_path = os.path.join(UPLOAD_DIR, "ocr_latest.jpg")
+    with open(debug_path, "wb") as df:
+        df.write(image_bytes)
+
+    if len(image_bytes) > 10 * 1024 * 1024:
+        return jsonify({"error": "Image too large (max 10MB)"}), 400
+
+    try:
+        from ocr import run_ocr
+        result = run_ocr(image_bytes)
+    except Exception as e:
+        import traceback
+        print(f"[OCR ERROR] {e}")
+        traceback.print_exc()
+        return jsonify({"error": "OCR processing failed. Please try again."}), 500
+
+    items = result.get("items", [])
+    charges = result.get("charges", [])
+    charges_included = result.get("charges_included", False)
+
+    if not items:
+        return jsonify({"error": "No items found on receipt. Try a clearer photo."})
+
+    subtotal = sum(item["price"] * item["qty"] for item in items)
+    charges_total = sum(c["price"] for c in charges)
+    # If charges are already included in menu prices, don't add them
+    total = subtotal if charges_included else subtotal + charges_total
+    return jsonify({
+        "items": items,
+        "charges": charges,
+        "charges_included": charges_included,
+        "subtotal": round(subtotal, 2),
+        "total": round(total, 2),
+    })
+
+
+@app.route("/api/sessions/<session_id>/participants/<name>/self-confirm", methods=["POST"])
+def api_self_confirm(session_id, name):
+    """Participant confirms their own payment. Only allowed if they've read the whisper."""
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    participant = next((p for p in session["participants"] if p["name"] == name), None)
+    if not participant:
+        return jsonify({"error": "Participant not found"}), 404
+    if not participant.get("whisper_read"):
+        return jsonify({"error": "You must view your QR code first"}), 403
+    db.update_participant_status(session_id, name, "self-confirmed")
+    # Notify group chat
+    chat_id = session.get("chat_id")
+    tid_kwargs = {}
+    if session.get("thread_id"):
+        tid_kwargs["message_thread_id"] = int(session["thread_id"])
+    if chat_id:
+        try:
+            cid = int(chat_id)
+            p_mention = _mention(name, participant.get("telegram_id"), cid)
+            bot.send_message(
+                cid,
+                f"💸 {p_mention} says they've paid <b>${participant['amount']}</b>.\n"
+                f"Awaiting confirmation from {_mention(session['payee'], chat_id=cid)}.",
+                parse_mode="HTML",
+                **tid_kwargs,
+            )
+        except Exception as e:
+            print(f"[BOT ERROR] Self-confirm notify failed: {e}")
+    return jsonify({"ok": True, "status": "self-confirmed"})
 
 
 @app.route("/api/sessions/<session_id>/qr/<name>", methods=["GET"])
@@ -250,6 +413,7 @@ def api_qr(session_id, name):
             phone=payee_phone,
             amount=participant["amount"],
             payee_name=session["payee"],
+            reference=participant.get("payment_ref", ""),
         )
     else:
         qr_data = (
@@ -264,7 +428,10 @@ def api_qr(session_id, name):
     from datetime import datetime
     date_str = datetime.utcnow().strftime("%Y%m%d")
     event_clean = session["event_name"].replace(" ", "_")[:20]
-    filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
+    # Sanitize filename to ASCII only (emoji/unicode chars break HTTP headers)
+    name_clean = name.encode("ascii", "ignore").decode("ascii").strip() or "user"
+    event_clean = event_clean.encode("ascii", "ignore").decode("ascii").strip() or "event"
+    filename = f"PayNow_QR_{name_clean}_{event_clean}_{date_str}.png"
     response = send_file(buf, mimetype="image/png", download_name=filename)
     response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
     return response
@@ -286,7 +453,12 @@ def api_pay_page(session_id, name):
     from datetime import datetime
     date_str = datetime.utcnow().strftime("%Y%m%d")
     event_clean = session["event_name"].replace(" ", "_")[:20]
-    filename = f"PayNow_QR_{name}_{event_clean}_{date_str}.png"
+    name_clean = name.encode("ascii", "ignore").decode("ascii").strip() or "user"
+    event_clean = event_clean.encode("ascii", "ignore").decode("ascii").strip() or "event"
+    filename = f"PayNow_QR_{name_clean}_{event_clean}_{date_str}.png"
+
+    payment_ref = participant.get("payment_ref", "")
+    is_paid = participant["status"] == "paid"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -310,15 +482,25 @@ def api_pay_page(session_id, name):
   .btn {{ display: block; width: 100%; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: 600; text-decoration: none; text-align: center; transition: all 0.2s; cursor: pointer; border: none; }}
   .btn-primary {{ background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; margin-bottom: 12px; }}
   .btn-primary:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(59,130,246,0.4); }}
-  .btn-secondary {{ background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); }}
-  .btn-secondary:hover {{ background: rgba(255,255,255,0.15); }}
+  .btn-upload {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; position: relative; overflow: hidden; }}
+  .btn-upload:hover {{ transform: translateY(-2px); box-shadow: 0 8px 20px rgba(34,197,94,0.4); }}
+  .btn-upload input {{ position: absolute; inset: 0; opacity: 0; cursor: pointer; }}
+  .btn-paid {{ background: linear-gradient(135deg, #22c55e, #16a34a); color: white; margin-top: 12px; opacity: 0.9; }}
+  .ref {{ background: rgba(255,255,255,0.08); border-radius: 8px; padding: 8px 12px; margin-bottom: 16px; font-size: 12px; color: rgba(255,255,255,0.5); }}
+  .ref code {{ color: #4ade80; font-weight: 600; font-family: 'SF Mono', monospace; }}
   .event {{ color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 16px; }}
+  .status-msg {{ padding: 12px; border-radius: 10px; margin-top: 12px; font-size: 14px; }}
+  .status-ok {{ background: rgba(34,197,94,0.15); border: 1px solid rgba(34,197,94,0.3); color: #4ade80; }}
+  .status-err {{ background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: #f87171; }}
+  .spinner {{ display: inline-block; width: 18px; height: 18px; border: 2px solid white; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 8px; }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="title">PayNow Payment</div>
   <div class="amount">${participant['amount']}</div>
+  {'<div class="status-msg status-ok">✅ Payment screenshot submitted</div>' if is_paid else f"""
   <div class="qr-wrap">
     <img src="{qr_img_url}" alt="PayNow QR Code">
   </div>
@@ -327,10 +509,48 @@ def api_pay_page(session_id, name):
     <div class="row"><span class="label">PayNow</span><span class="value">{phone_display}</span></div>
     <div class="row"><span class="label">Amount</span><span class="value">${participant['amount']}</span></div>
     <div class="row"><span class="label">Event</span><span class="value">{session['event_name']}</span></div>
+    <div class="row"><span class="label">Ref</span><span class="value">{payment_ref}</span></div>
   </div>
+  <div class="ref">Include ref <code>{payment_ref}</code> in your PayNow comment</div>
   <a href="{qr_img_url}" download="{filename}" class="btn btn-primary">📥 Download QR Image</a>
+  <div id="upload-area">
+    <label class="btn btn-upload" id="upload-btn">
+      📸 Upload Payment Screenshot
+      <input type="file" accept="image/*" onchange="uploadScreenshot(this)">
+    </label>
+  </div>
+  <div id="status"></div>
+  """}
   <div class="event">GroupPay — {session['event_name']}</div>
 </div>
+<script>
+async function uploadScreenshot(input) {{
+  const file = input.files[0];
+  if (!file) return;
+  const btn = document.getElementById('upload-btn');
+  const status = document.getElementById('status');
+  btn.innerHTML = '<span class="spinner"></span>Uploading...';
+  const formData = new FormData();
+  formData.append('screenshot', file);
+  try {{
+    const res = await fetch('/api/sessions/{session_id}/participants/{quote(name)}/screenshot', {{
+      method: 'POST',
+      body: formData,
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+      btn.outerHTML = '<div class="btn btn-paid">✅ Screenshot Submitted</div>';
+      status.innerHTML = '<div class="status-msg status-ok">Payment recorded — you\\'re all set!</div>';
+    }} else {{
+      status.innerHTML = '<div class="status-msg status-err">' + (data.error || 'Upload failed') + '</div>';
+      btn.innerHTML = '📸 Upload Payment Screenshot<input type="file" accept="image/*" onchange="uploadScreenshot(this)">';
+    }}
+  }} catch {{
+    status.innerHTML = '<div class="status-msg status-err">Upload failed — try again</div>';
+    btn.innerHTML = '📸 Upload Payment Screenshot<input type="file" accept="image/*" onchange="uploadScreenshot(this)">';
+  }}
+}}
+</script>
 </body>
 </html>"""
 
@@ -350,10 +570,12 @@ def _track_member(msg):
         _save_members()
 
 
-def _build_webapp_url(chat_id: int) -> str:
-    """Build webapp URL with known members and chat_id as query params."""
+def _build_webapp_url(chat_id: int, thread_id: int | None = None) -> str:
+    """Build webapp URL with known members, chat_id, and thread_id as query params."""
     members = group_members.get(chat_id, {})
     parts_list = [f"chat_id={chat_id}"]
+    if thread_id:
+        parts_list.append(f"thread_id={thread_id}")
     if members:
         member_str = ",".join(f"{quote(name)}:{uid}" for uid, name in members.items())
         parts_list.append(f"members={member_str}")
@@ -363,7 +585,8 @@ def _build_webapp_url(chat_id: int) -> str:
 
 def _make_keyboard(msg) -> types.InlineKeyboardMarkup:
     """Create the Open GroupPay button — web_app in private, url in groups."""
-    url = _build_webapp_url(msg.chat.id)
+    thread_id = getattr(msg, 'message_thread_id', None)
+    url = _build_webapp_url(msg.chat.id, thread_id)
     kb = types.InlineKeyboardMarkup()
     if msg.chat.type == "private":
         kb.add(types.InlineKeyboardButton(
@@ -378,10 +601,11 @@ def _make_keyboard(msg) -> types.InlineKeyboardMarkup:
     return kb
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("qr:"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("qr|") or call.data.startswith("qr:"))
 def handle_qr_whisper(call):
     """Handle whisper QR button clicks — only show QR to the intended recipient."""
-    parts = call.data.split(":", 3)  # qr:session_id:name:telegram_id
+    delim = "|" if "|" in call.data else ":"
+    parts = call.data.split(delim, 3)  # qr|session_id|name|telegram_id
     if len(parts) < 4:
         bot.answer_callback_query(call.id, "Invalid QR data.", show_alert=True)
         return
@@ -392,11 +616,18 @@ def handle_qr_whisper(call):
     print(f"[WHISPER] Click by {clicker.first_name} (id={clicker.id}, username={clicker.username}) — target: {target_name} (tid={target_tid})")
 
     # Check if clicker is the intended recipient
-    is_target = (
-        str(clicker.id) == target_tid
-        or (clicker.first_name or "").lower() == target_name.lower()
-        or (clicker.username or "").lower() == target_name.lower()
-    )
+    # Telegram ID is the strongest check; username (@tag) is unique and stable;
+    # first_name is NOT checked when ID is known (easily duplicated)
+    if target_tid and target_tid != "0":
+        is_target = (
+            str(clicker.id) == target_tid
+            or (clicker.username or "").lower() == target_name.lower()
+        )
+    else:
+        is_target = (
+            (clicker.first_name or "").lower() == target_name.lower()
+            or (clicker.username or "").lower() == target_name.lower()
+        )
 
     if not is_target:
         bot.answer_callback_query(
@@ -416,10 +647,10 @@ def handle_qr_whisper(call):
         bot.answer_callback_query(call.id, "Participant not found.", show_alert=True)
         return
 
-    payee_phone = session.get("payee_phone", "")
-    phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
-
     bot.answer_callback_query(call.id, "🔓 QR code unlocked!")
+
+    # Mark whisper as read
+    db.mark_whisper_read(session_id, target_name)
 
     # Replace button with payment details + QR page link
     qr_page_url = f"{WEBAPP_URL}/api/sessions/{session_id}/pay/{quote(target_name)}"
@@ -427,10 +658,10 @@ def handle_qr_whisper(call):
     try:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("📲 Open PayNow QR", url=qr_page_url))
+        payee_mention = _mention(session["payee"], chat_id=call.message.chat.id)
         bot.edit_message_text(
             f"💸 {p_mention} owes <b>${participant['amount']}</b>\n"
-            f"💰 Pay to: <b>{session['payee']}</b>\n"
-            f"📲 PayNow: <b>{phone_display}</b>\n\n"
+            f"💰 Pay to: {payee_mention}\n\n"
             f"👇 Tap below to view your QR code",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
@@ -439,6 +670,12 @@ def handle_qr_whisper(call):
         )
     except Exception:
         pass
+
+
+def _thread_kwargs(msg) -> dict:
+    """Return message_thread_id kwarg if the message is in a forum topic."""
+    tid = getattr(msg, 'message_thread_id', None)
+    return {"message_thread_id": tid} if tid else {}
 
 
 @bot.message_handler(commands=["start"])
@@ -451,6 +688,7 @@ def cmd_start(msg):
         "Tap the button below or use /split to open the app.",
         parse_mode="Markdown",
         reply_markup=_make_keyboard(msg),
+        **_thread_kwargs(msg),
     )
 
 
@@ -462,6 +700,7 @@ def cmd_split(msg):
         "📢 *Let's split a bill!*\n\nTap below to open GroupPay:",
         parse_mode="Markdown",
         reply_markup=_make_keyboard(msg),
+        **_thread_kwargs(msg),
     )
 
 
@@ -475,6 +714,7 @@ def cmd_help(msg):
         "/split — Start a new bill split\n"
         "/help — Show this help message",
         parse_mode="Markdown",
+        **_thread_kwargs(msg),
     )
 
 
@@ -524,6 +764,52 @@ def handle_webapp_data(msg):
 # Main
 # ---------------------------------------------------------------------------
 
+def _auto_remind_loop():
+    """Background loop: check for due auto-reminders every 5 minutes."""
+    import time as _time
+    while True:
+        try:
+            due = db.get_due_reminders()
+            for session in due:
+                chat_id = session.get("chat_id")
+                if not chat_id:
+                    continue
+                cid = int(chat_id)
+                tid_kwargs = {}
+                if session.get("thread_id"):
+                    tid_kwargs["message_thread_id"] = int(session["thread_id"])
+                unpaid = [p for p in session["participants"] if p["status"] != "paid"]
+                if not unpaid:
+                    continue
+                try:
+                    names = "\n".join(
+                        f"  • {_mention(p['name'], p.get('telegram_id'), cid)} — <b>${p['amount']}</b>"
+                        for p in unpaid
+                    )
+                    payee_mention = _mention(session["payee"], chat_id=cid)
+                    session_url = f"{WEBAPP_URL}?session={session['id']}"
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton("💰 View Split", url=session_url))
+                    bot.send_message(
+                        cid,
+                        f"🔔 <b>Auto-Reminder</b>\n\n"
+                        f"For <b>{session['event_name']}</b> organized by {payee_mention}:\n\n"
+                        f"{names}\n\n"
+                        f"Please pay soon! 🙏",
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                        **tid_kwargs,
+                    )
+                    print(f"[AUTO-REMIND] Sent for session {session['id']} to chat {cid} ({len(unpaid)} unpaid)")
+                    # One-shot: clear reminder after sending
+                    db.cancel_auto_remind(session["id"])
+                except Exception as e:
+                    print(f"[AUTO-REMIND ERROR] Session {session['id']}: {e}")
+        except Exception as e:
+            print(f"[AUTO-REMIND ERROR] Loop: {e}")
+        _time.sleep(300)  # Check every 5 minutes
+
+
 if __name__ == "__main__":
     db.init_db()
     print(f"🤖 GroupPay Bot running — Mini App URL: {WEBAPP_URL}")
@@ -535,5 +821,9 @@ if __name__ == "__main__":
         daemon=True,
     )
     flask_thread.start()
+
+    # Run auto-reminder checker in background
+    remind_thread = threading.Thread(target=_auto_remind_loop, daemon=True)
+    remind_thread.start()
 
     bot.infinity_polling(skip_pending=True)

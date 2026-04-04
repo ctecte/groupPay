@@ -94,7 +94,26 @@ Or edit the defaults directly in `bot.py` (lines 22-23).
 
 Telegram Mini Apps require HTTPS. Pick one:
 
-#### Option A: ngrok (recommended)
+#### Option A: Cloudflare Tunnel (recommended)
+
+No account needed. Less likely to be blocked by school/corporate firewalls.
+
+```bash
+# Install cloudflared
+curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+chmod +x /usr/local/bin/cloudflared
+
+# Start tunnel
+cloudflared tunnel --url http://localhost:5000
+```
+
+Copy the generated `https://xxxx.trycloudflare.com` URL and set it as `WEBAPP_URL`.
+
+> **Note**: The URL changes every restart. Update `WEBAPP_URL` and the BotFather Menu Button URL each time.
+
+#### Option B: ngrok
+
+Requires a free account at [ngrok.com](https://ngrok.com).
 
 ```bash
 # First time: authenticate (one-time setup)
@@ -103,20 +122,11 @@ ngrok config add-authtoken YOUR_NGROK_AUTH_TOKEN
 # Free tier (random URL — changes each restart)
 ngrok http 5000
 
-# With a stable domain (free with ngrok account)
+# With a stable domain (free with ngrok account — URL stays the same)
 ngrok http 5000 --domain=your-subdomain.ngrok-free.dev
 ```
 
-> **Important**: If using a random URL, you must update `WEBAPP_URL` every time ngrok restarts. A stable domain avoids this.
-
-#### Option B: Cloudflare Tunnel
-
-```bash
-# Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-cloudflared tunnel --url http://localhost:5000
-```
-
-Copy the generated HTTPS URL and set it as `WEBAPP_URL`.
+> **Note**: ngrok domains may be blocked on some networks (school, corporate). Use Cloudflare Tunnel if you hit connectivity issues.
 
 ### 6. Configure the bot with BotFather
 
@@ -141,10 +151,12 @@ This starts:
 After initial setup, use the included script:
 
 ```bash
-./start.sh
+./start.sh              # Cloudflare Tunnel (default)
+./start.sh ngrok        # ngrok with stable domain
+./start.sh ngrok-free   # ngrok free tier (random URL)
 ```
 
-This kills any existing processes, rebuilds the frontend, and starts ngrok + bot.
+This kills any existing processes, rebuilds the frontend, starts the tunnel, and launches the bot. The `WEBAPP_URL` is set automatically from the tunnel output.
 
 ### Auto-created files
 

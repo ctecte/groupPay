@@ -23,9 +23,11 @@ export async function createSession(data: {
   payee: string;
   payee_phone?: string;
   payee_amount?: string;
+  payee_telegram_id?: string;
   even_split: boolean;
   participants: { name: string; amount: string; telegram_id?: string }[];
   chat_id?: string;
+  thread_id?: string;
 }): Promise<Session> {
   const res = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
@@ -46,13 +48,14 @@ export async function updatePaymentStatus(
   sessionId: string,
   participantName: string,
   status: 'paid' | 'pending',
+  telegramId?: string,
 ): Promise<void> {
   const res = await fetch(
     `${API_BASE}/sessions/${sessionId}/participants/${encodeURIComponent(participantName)}/status`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, telegram_id: telegramId }),
     },
   );
   if (!res.ok) throw new Error(`Failed to update status: ${res.statusText}`);
@@ -77,6 +80,39 @@ export async function sendReminders(sessionId: string): Promise<void> {
     method: 'POST',
   });
   if (!res.ok) throw new Error(`Failed to send reminders: ${res.statusText}`);
+}
+
+export async function setAutoRemind(
+  sessionId: string,
+  hours: number | null,
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/sessions/${sessionId}/auto-remind`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hours !== null ? { hours } : {}),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to set auto-remind: ${res.statusText}`);
+}
+
+export async function scanReceipt(file: File): Promise<{
+  items?: { name: string; price: number; qty: number }[];
+  charges?: { name: string; price: number }[];
+  charges_included?: boolean;
+  subtotal?: number;
+  total?: number;
+  error?: string;
+}> {
+  const formData = new FormData();
+  formData.append('receipt', file);
+  const res = await fetch(`${API_BASE}/ocr`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`OCR failed: ${res.statusText}`);
+  return res.json();
 }
 
 export function qrUrl(sessionId: string, participantName: string): string {
