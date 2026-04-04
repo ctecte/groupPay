@@ -26,6 +26,7 @@ def generate_paynow_qr_data(
     payee_name: str = "GROUPPAY",
     editable: bool = False,
     one_time: bool = True,
+    reference: str = "",
 ) -> str:
     """
     Generate EMVCo-compliant PayNow QR code data string.
@@ -68,6 +69,10 @@ def generate_paynow_qr_data(
         + _tlv("59", name)  # Merchant Name
         + _tlv("60", "Singapore")  # City
     )
+
+    # Tag 62: Additional Data — bill/reference number for traceability
+    if reference:
+        payload += _tlv("62", _tlv("01", reference[:25]))
 
     # CRC placeholder — tag 63, length 04, then compute
     payload += "6304"
