@@ -810,20 +810,55 @@ def _auto_remind_loop():
         _time.sleep(300)  # Check every 5 minutes
 
 
+# ---------------------------------------------------------------------------
+# Webhook endpoint — Telegram sends updates here instead of us polling
+# ---------------------------------------------------------------------------
+
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    """Receive Telegram updates via webhook."""
+    if request.headers.get("content-type") == "application/json":
+        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+        bot.process_new_updates([update])
+    return "", 200
+
+
+def _setup_webhook():
+    """Set Telegram webhook to point at our server."""
+    webhook_url = f"{WEBAPP_URL}/webhook/{BOT_TOKEN}"
+    bot.remove_webhook()
+    import time
+    time.sleep(0.5)
+    bot.set_webhook(url=webhook_url)
+    print(f"🔗 Webhook set: {webhook_url}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     db.init_db()
     print(f"🤖 GroupPay Bot running — Mini App URL: {WEBAPP_URL}")
     print("🌐 Flask API running on http://0.0.0.0:5000")
 
-    # Run Flask in a background thread
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=5000, debug=False),
-        daemon=True,
-    )
-    flask_thread.start()
+    # Set up webhook if WEBAPP_URL is configured, otherwise fall back to polling
+    use_webhook = bool(WEBAPP_URL)
 
     # Run auto-reminder checker in background
     remind_thread = threading.Thread(target=_auto_remind_loop, daemon=True)
     remind_thread.start()
 
-    bot.infinity_polling(skip_pending=True)
+    if use_webhook:
+        _setup_webhook()
+        # Flask handles everything — webhook + API + static files
+        app.run(host="0.0.0.0", port=5000, debug=False)
+    else:
+        # Fallback: polling mode (for local dev without tunnel)
+        print("⚠️  No WEBAPP_URL — using polling mode (set WEBAPP_URL for webhook)")
+        flask_thread = threading.Thread(
+            target=lambda: app.run(host="0.0.0.0", port=5000, debug=False),
+            daemon=True,
+        )
+        flask_thread.start()
+        bot.infinity_polling(skip_pending=True)
