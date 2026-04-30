@@ -1014,16 +1014,23 @@ export default function GroupPayPrototype() {
         {step === 'item-assign' && (() => {
           const allPeople = [currentUser, ...otherParticipants];
           const totalCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
-          const assignedCount = ocrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
-          const allAssigned = assignedCount === ocrItems.length;
+          const expandedOcrItems = ocrItems.flatMap((item) => {
+            const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
+            return Array.from({ length: qty }, (_, unitIdx) => ({
+              name: qty > 1 ? `${item.name} (${unitIdx + 1}/${qty})` : item.name,
+              price: item.price,
+            }));
+          });
+          const assignedCount = expandedOcrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
+          const allAssigned = expandedOcrItems.length > 0 && assignedCount === expandedOcrItems.length;
 
           // Calculate per-person totals
           const personFoodTotals: Record<string, number> = {};
           allPeople.forEach(p => { personFoodTotals[p] = 0; });
-          ocrItems.forEach((item, idx) => {
+          expandedOcrItems.forEach((item, idx) => {
             const assignees = itemAssignments[idx] || [];
             if (assignees.length === 0) return;
-            const perPerson = (item.price * item.qty) / assignees.length;
+            const perPerson = item.price / assignees.length;
             assignees.forEach(name => {
               personFoodTotals[name] = (personFoodTotals[name] || 0) + perPerson;
             });
@@ -1068,15 +1075,15 @@ export default function GroupPayPrototype() {
             <h2 className="text-white text-xl font-bold mb-1">Assign Items</h2>
             <p className="text-blue-200 text-sm mb-4">Tap people to assign each item. Shared items split evenly.</p>
 
-            <div className="text-white/40 text-xs mb-2 font-semibold uppercase tracking-wider">{assignedCount}/{ocrItems.length} items assigned</div>
+            <div className="text-white/40 text-xs mb-2 font-semibold uppercase tracking-wider">{assignedCount}/{expandedOcrItems.length} items assigned</div>
             <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mb-3">
-              <div className={`h-full rounded-full transition-all duration-300 ${allAssigned ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${ocrItems.length > 0 ? (assignedCount / ocrItems.length) * 100 : 0}%` }} />
+              <div className={`h-full rounded-full transition-all duration-300 ${allAssigned ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${expandedOcrItems.length > 0 ? (assignedCount / expandedOcrItems.length) * 100 : 0}%` }} />
             </div>
 
             <button
               onClick={() => {
                 const all: Record<number, string[]> = {};
-                ocrItems.forEach((_, idx) => { all[idx] = [...allPeople]; });
+                expandedOcrItems.forEach((_, idx) => { all[idx] = [...allPeople]; });
                 setItemAssignments(all);
               }}
               className="w-full mb-5 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border bg-white/5 border-white/15 text-white/50 hover:border-blue-400/50 hover:text-blue-300"
@@ -1085,7 +1092,7 @@ export default function GroupPayPrototype() {
             </button>
 
             <div className="space-y-4 mb-6 max-h-[50vh] overflow-y-auto">
-              {ocrItems.map((item, idx) => {
+              {expandedOcrItems.map((item, idx) => {
                 const assignees = itemAssignments[idx] || [];
                 const isAssigned = assignees.length > 0;
                 return (
@@ -1093,9 +1100,8 @@ export default function GroupPayPrototype() {
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex-1">
                         <div className="text-white text-sm font-medium">{item.name}</div>
-                        {item.qty > 1 && <div className="text-white/40 text-xs mono">Qty: {item.qty}</div>}
                       </div>
-                      <div className="text-green-400 mono font-semibold text-sm">${(item.price * item.qty).toFixed(2)}</div>
+                      <div className="text-green-400 mono font-semibold text-sm">${item.price.toFixed(2)}</div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {allPeople.map(person => {
@@ -1110,7 +1116,7 @@ export default function GroupPayPrototype() {
                                 : 'bg-white/5 border-white/15 text-white/40 hover:border-white/30'
                             }`}
                           >
-                            {person}{isSelected && assignees.length > 1 ? ` · $${((item.price * item.qty) / assignees.length).toFixed(2)}` : ''}
+                            {person}{isSelected && assignees.length > 1 ? ` · $${(item.price / assignees.length).toFixed(2)}` : ''}
                           </button>
                         );
                       })}
