@@ -17,8 +17,10 @@ export default function GroupPayPrototype() {
   const [ocrScanning, setOcrScanning] = useState(false);
   const [ocrItems, setOcrItems] = useState<{ name: string; price: number; qty: number }[]>([]);
   const [ocrCharges, setOcrCharges] = useState<{ name: string; price: number }[]>([]);
+  const [ocrInformationalCharges, setOcrInformationalCharges] = useState<{ name: string; price: number }[]>([]);
   const [ocrChargesIncluded, setOcrChargesIncluded] = useState(false);
   const [ocrSubtotal, setOcrSubtotal] = useState(0);
+  const [ocrReceiptGrandTotal, setOcrReceiptGrandTotal] = useState<number | null>(null);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrEditing, setOcrEditing] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
@@ -247,9 +249,11 @@ export default function GroupPayPrototype() {
         return;
       }
       setOcrItems(result.items);
-      setOcrCharges(result.charges ?? []);
-      setOcrChargesIncluded(result.charges_included ?? false);
+      setOcrCharges(result.add_on_charges ?? result.charges ?? []);
+      setOcrInformationalCharges(result.informational_charges ?? []);
+      setOcrChargesIncluded((result.add_on_charges?.length ?? 0) === 0 && (result.informational_charges?.length ?? 0) > 0);
       setOcrSubtotal(result.subtotal ?? 0);
+      setOcrReceiptGrandTotal(result.receipt_grand_total ?? null);
       setBillAmount((result.total ?? 0).toFixed(2));
       setItemAssignments({});
       setOcrEditing(false);
@@ -600,13 +604,16 @@ export default function GroupPayPrototype() {
             setOcrCharges(prev => prev.filter((_, i) => i !== index));
           };
           const addCharge = (name: string, price: number, included: boolean) => {
+            if (included) {
+              setOcrInformationalCharges(prev => [...prev, { name, price }]);
+              return;
+            }
             setOcrCharges(prev => [...prev, { name, price }]);
-            if (included) setOcrChargesIncluded(true);
           };
-          const toggleChargeIncluded = () => setOcrChargesIncluded(prev => !prev);
           const computedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
-          const computedCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
+          const computedCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
           const computedTotal = computedSubtotal + computedCharges;
+          const totalMismatch = ocrReceiptGrandTotal !== null && Math.abs(ocrReceiptGrandTotal - computedTotal) > 0.01;
           const hasMissingPrices = ocrItems.some(i => i.price === 0);
 
           return (
@@ -623,7 +630,7 @@ export default function GroupPayPrototype() {
                 <div className="bg-white/5 rounded-xl p-4 mb-6 max-h-96 overflow-y-auto">
                   <div className="space-y-2">
                     {ocrItems.map((item, index) => (
-                      <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 1 || ocrCharges.length > 0 ? 'border-b border-white/10' : ''}`}>
+                      <div key={index} className={`flex justify-between items-start py-2 ${index < ocrItems.length - 1 || ocrCharges.length > 0 || ocrInformationalCharges.length > 0 ? 'border-b border-white/10' : ''}`}>
                         <div className="flex-1"><div className={`text-sm ${item.price === 0 ? 'text-amber-300' : 'text-white'}`}>{item.name}</div>{item.qty > 1 && <div className="text-white/50 text-xs mono">Qty: {item.qty}</div>}</div>
                         {item.price === 0 ? (
                           <div className="text-amber-400 mono font-semibold flex items-center gap-1">$?.?? <span className="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">needs price</span></div>
@@ -647,13 +654,33 @@ export default function GroupPayPrototype() {
                         </div>
                       </div>
                     )}
+                    {ocrInformationalCharges.length > 0 && (
+                      <div className="pt-2">
+                        {ocrInformationalCharges.map((charge, index) => (
+                          <div key={`info-charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrInformationalCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
+                            <div className="text-white/50 text-sm">{charge.name}</div>
+                            <div className="mono font-semibold text-white/30 line-through">
+                              ${charge.price.toFixed(2)}
+                            </div>
+                          </div>
+                        ))}
+                        <div className="text-xs mt-1 px-2 py-1 rounded text-white/40 bg-white/5">
+                          Informational only — already included in the payable total
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
                 </div>
                 {hasMissingPrices ? (
                   <div className="bg-amber-500/10 rounded-xl p-4 mb-6 border border-amber-400/30"><p className="text-amber-200 text-sm"><strong className="text-white">⚠ Some prices couldn't be read</strong><br />Tap <strong>Edit</strong> to fill in the missing prices before continuing.</p></div>
                 ) : (
-                  <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} charges${ocrChargesIncluded ? ' (included in prices)' : ''}` : ''} = ${computedTotal.toFixed(2)}</p></div>
+                  <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} add-on charges` : ''}{ocrInformationalCharges.length > 0 ? ` + ${ocrInformationalCharges.length} informational charges` : ''} = ${computedTotal.toFixed(2)}{ocrReceiptGrandTotal !== null ? ` (receipt total: $${ocrReceiptGrandTotal.toFixed(2)})` : ''}</p></div>
+                )}
+                {totalMismatch && (
+                  <div className="bg-amber-500/10 rounded-xl p-4 mb-6 border border-amber-400/30">
+                    <p className="text-amber-200 text-sm"><strong className="text-white">Check the extracted totals</strong><br />Current items add up to ${computedTotal.toFixed(2)}, but the receipt shows ${ocrReceiptGrandTotal?.toFixed(2)}.</p>
+                  </div>
                 )}
               </>
             ) : (
@@ -682,38 +709,53 @@ export default function GroupPayPrototype() {
                   ))}
                 </div>
                 <button onClick={addItem} className="w-full mb-4 py-2.5 rounded-xl border-2 border-dashed border-white/20 text-white/50 hover:text-white hover:border-white/40 text-sm font-semibold transition-all">+ Add Item</button>
-                <div className={`mb-4 rounded-xl p-4 border ${ocrCharges.length > 0 ? (ocrChargesIncluded ? 'bg-white/5 border-white/10' : 'bg-amber-500/5 border-amber-400/20') : 'bg-white/5 border-white/10'}`}>
-                  <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">GST & Service Charge</div>
+                <div className={`mb-4 rounded-xl p-4 border ${(ocrCharges.length > 0 || ocrInformationalCharges.length > 0) ? 'bg-white/5 border-white/10' : 'bg-white/5 border-white/10'}`}>
+                  <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">Receipt Charges</div>
                   {ocrCharges.length > 0 && (
                     <>
+                      <div className="text-amber-300/70 text-[11px] font-semibold uppercase tracking-wider mb-2">Added on top</div>
                       {ocrCharges.map((charge, index) => (
                         <div key={`charge-${index}`} className="flex items-center gap-2 mb-2">
-                          <input type="text" value={charge.name} onChange={(e) => updateCharge(index, 'name', e.target.value)} className={`flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none ${ocrChargesIncluded ? 'text-white/30' : 'text-white/60'}`} />
-                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => updateCharge(index, 'price', e.target.value)} className={`w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none ${ocrChargesIncluded ? 'text-white/30 line-through' : 'text-amber-400'}`} />
+                          <input type="text" value={charge.name} onChange={(e) => updateCharge(index, 'name', e.target.value)} className="flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/60" />
+                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => updateCharge(index, 'price', e.target.value)} className="w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-amber-400" />
                           <button onClick={() => removeCharge(index)} className="text-red-400/60 hover:text-red-400 p-1"><X size={18} /></button>
                         </div>
                       ))}
-                      <div className="flex rounded-lg overflow-hidden border border-white/15 mt-3 mb-1">
-                        <button onClick={() => setOcrChargesIncluded(false)} className={`flex-1 py-2.5 text-xs font-semibold transition-all ${!ocrChargesIncluded ? 'bg-amber-500/25 text-amber-300 border-r border-amber-400/30' : 'bg-white/5 text-white/30 border-r border-white/10'}`}>
-                          Add to total
-                        </button>
-                        <button onClick={() => setOcrChargesIncluded(true)} className={`flex-1 py-2.5 text-xs font-semibold transition-all ${ocrChargesIncluded ? 'bg-white/10 text-white/60' : 'bg-white/5 text-white/30'}`}>
-                          Already in prices
-                        </button>
-                      </div>
-                      <div className={`text-xs mt-1 ${ocrChargesIncluded ? 'text-white/30' : 'text-amber-300/70'}`}>
-                        {ocrChargesIncluded ? 'Prices already include GST/svc — charges shown for info only' : `$${computedCharges.toFixed(2)} will be added on top and split proportionally`}
+                      <div className="text-xs mt-1 text-amber-300/70">
+                        ${computedCharges.toFixed(2)} will be added on top and split proportionally
                       </div>
                     </>
                   )}
-                  <div className={`flex gap-2 ${ocrCharges.length > 0 ? 'mt-3' : 'mt-0'}`}>
+                  {ocrInformationalCharges.length > 0 && (
+                    <>
+                      <div className={`text-white/30 text-[11px] font-semibold uppercase tracking-wider ${ocrCharges.length > 0 ? 'mt-4 mb-2' : 'mb-2'}`}>Already included</div>
+                      {ocrInformationalCharges.map((charge, index) => (
+                        <div key={`info-charge-edit-${index}`} className="flex items-center gap-2 mb-2">
+                          <input type="text" value={charge.name} onChange={(e) => {
+                            const value = e.target.value;
+                            setOcrInformationalCharges(prev => prev.map((c, i) => i === index ? { ...c, name: value } : c));
+                          }} className="flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/30" />
+                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => {
+                            const value = Number(e.target.value);
+                            setOcrInformationalCharges(prev => prev.map((c, i) => i === index ? { ...c, price: Number.isFinite(value) ? value : 0 } : c));
+                          }} className="w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/30 line-through" />
+                          <button onClick={() => setOcrInformationalCharges(prev => prev.filter((_, i) => i !== index))} className="text-red-400/60 hover:text-red-400 p-1"><X size={18} /></button>
+                        </div>
+                      ))}
+                      <div className="text-xs mt-1 text-white/30">
+                        Shown for reference only. These do not get added into the split total.
+                      </div>
+                    </>
+                  )}
+                  <div className={`flex gap-2 ${(ocrCharges.length > 0 || ocrInformationalCharges.length > 0) ? 'mt-3' : 'mt-0'}`}>
                     <button onClick={() => addCharge('9% GST', +(computedSubtotal * 0.09).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 9% GST</button>
                     <button onClick={() => addCharge('10% Svc Charge', +(computedSubtotal * 0.10).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 10% Svc</button>
                   </div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
                   <div className="flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
-                  {!ocrChargesIncluded && computedCharges > 0 && <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>}
+                  {computedCharges > 0 && <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>}
+                  {ocrReceiptGrandTotal !== null && <div className="text-white/30 text-xs mono mt-1 text-right">Receipt total: ${ocrReceiptGrandTotal.toFixed(2)}</div>}
                 </div>
               </>
             )}
@@ -1013,7 +1055,7 @@ export default function GroupPayPrototype() {
         {/* Item Assignment (receipt scan only) */}
         {step === 'item-assign' && (() => {
           const allPeople = [currentUser, ...otherParticipants];
-          const totalCharges = ocrChargesIncluded ? 0 : ocrCharges.reduce((s, c) => s + c.price, 0);
+          const totalCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
           const expandedOcrItems = ocrItems.flatMap((item) => {
             const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
             return Array.from({ length: qty }, (_, unitIdx) => ({

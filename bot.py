@@ -320,7 +320,7 @@ def api_auto_remind(session_id):
 
 @app.route("/api/ocr", methods=["POST"])
 def api_ocr():
-    """Process a receipt image with PaddleOCR and return extracted items."""
+    """Process a receipt image with Gemini flash, with PaddleOCR as backup, and return extracted items."""
     if "receipt" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
@@ -345,22 +345,34 @@ def api_ocr():
         return jsonify({"error": "OCR processing failed. Please try again."}), 500
 
     items = result.get("items", [])
-    charges = result.get("charges", [])
-    charges_included = result.get("charges_included", False)
+    add_on_charges = result.get("add_on_charges", [])
+    informational_charges = result.get("informational_charges", [])
+    receipt_subtotal = result.get("receipt_subtotal")
+    receipt_grand_total = result.get("receipt_grand_total")
+    charges = result.get("charges", add_on_charges + informational_charges)
+    charges_included = result.get(
+        "charges_included",
+        bool(informational_charges) and not bool(add_on_charges),
+    )
 
     if not items:
         return jsonify({"error": "No items found on receipt. Try a clearer photo."})
 
-    subtotal = sum(item["price"] * item["qty"] for item in items)
-    charges_total = sum(c["price"] for c in charges)
-    # If charges are already included in menu prices, don't add them
-    total = subtotal if charges_included else subtotal + charges_total
+    computed_subtotal = round(sum(item["price"] * item["qty"] for item in items), 2)
+    computed_add_on_total = round(sum(c["price"] for c in add_on_charges), 2)
+    subtotal = round(receipt_subtotal, 2) if isinstance(receipt_subtotal, (int, float)) else computed_subtotal
+    computed_total = round(computed_subtotal + computed_add_on_total, 2)
+    total = round(receipt_grand_total, 2) if isinstance(receipt_grand_total, (int, float)) else computed_total
     return jsonify({
         "items": items,
+        "add_on_charges": add_on_charges,
+        "informational_charges": informational_charges,
         "charges": charges,
         "charges_included": charges_included,
-        "subtotal": round(subtotal, 2),
-        "total": round(total, 2),
+        "subtotal": subtotal,
+        "total": total,
+        "computed_total": computed_total,
+        "receipt_grand_total": round(receipt_grand_total, 2) if isinstance(receipt_grand_total, (int, float)) else None,
     })
 
 

@@ -95,6 +95,86 @@ _BARE_X_RE = re.compile(r'^[xX×]\s{2,}')
 _QTY_PRICE_RE = re.compile(r'(\d+)\s*[xX×]\s*S?\$?\s*(\d+\.\d{2})')
 
 
+def _to_money(value):
+    """Best-effort conversion of model output into a 2dp float."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    if isinstance(value, str):
+        match = _SG_PRICE_RE.search(value.replace(",", ""))
+        if match:
+            return round(float(match.group(1)), 2)
+        try:
+            return round(float(value.strip()), 2)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_model_items(items):
+    normalized = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        price = _to_money(item.get("price"))
+        qty = item.get("qty", 1)
+        try:
+            qty = max(1, int(qty))
+        except (TypeError, ValueError):
+            qty = 1
+        if not name or price is None:
+            continue
+        normalized.append({"name": name, "price": price, "qty": qty})
+    return normalized
+
+
+def _normalize_model_charges(charges):
+    normalized = []
+    for charge in charges or []:
+        if not isinstance(charge, dict):
+            continue
+        name = str(charge.get("name", "")).strip()
+        price = _to_money(charge.get("price"))
+        if not name or price is None:
+            continue
+        normalized.append({"name": name, "price": price})
+    return normalized
+
+
+def _normalize_gemini_result(result):
+    """Accept the new schema and map older responses into it."""
+    items = _normalize_model_items(result.get("items", []))
+    add_on_charges = _normalize_model_charges(
+        result.get("add_on_charges", result.get("charges", []))
+    )
+    informational_charges = _normalize_model_charges(result.get("informational_charges", []))
+    charges_included = bool(result.get("charges_included", False))
+
+    # Backward compatibility for the previous schema: a single `charges` list plus boolean.
+    if not result.get("add_on_charges") and not result.get("informational_charges") and result.get("charges"):
+        if charges_included:
+            informational_charges = _normalize_model_charges(result.get("charges", []))
+            add_on_charges = []
+        else:
+            add_on_charges = _normalize_model_charges(result.get("charges", []))
+            informational_charges = []
+
+    receipt_subtotal = _to_money(result.get("receipt_subtotal"))
+    receipt_grand_total = _to_money(result.get("receipt_grand_total"))
+
+    return {
+        "items": items,
+        "add_on_charges": add_on_charges,
+        "informational_charges": informational_charges,
+        "charges": add_on_charges + informational_charges,
+        "charges_included": bool(informational_charges) and not bool(add_on_charges),
+        "receipt_subtotal": receipt_subtotal,
+        "receipt_grand_total": receipt_grand_total,
+    }
+
+
 def _group_by_y(results):
     """Group OCR text boxes into rows by Y-coordinate proximity.
     Uses adaptive threshold based on text box height."""
@@ -342,24 +422,27 @@ def _gemini_ocr(image_bytes):
         return None
 
     b64 = base64.b64encode(image_bytes).decode()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{
             "parts": [
                 {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
                 {"text": (
-                    "Extract all food/drink items from this receipt image. "
+                    "Extract the bill structure from this receipt image. "
                     "Return ONLY valid JSON with this exact structure, no markdown:\n"
                     '{"items": [{"name": "Item Name", "price": 9.90, "qty": 1}], '
-                    '"charges": [{"name": "GST 9%", "price": 1.50}], '
-                    '"charges_included": false}\n\n'
+                    '"add_on_charges": [{"name": "Service Charge 10%", "price": 1.50}], '
+                    '"informational_charges": [{"name": "GST 9% (included)", "price": 0.99}], '
+                    '"receipt_subtotal": 18.00, '
+                    '"receipt_grand_total": 19.50}\n\n'
                     "Rules:\n"
                     "- items: individual food/drink items with name, unit price, quantity\n"
-                    "- charges: tax, GST, service charge lines (NOT food items)\n"
-                    "- charges_included: true if the grand total equals the food subtotal "
-                    "(meaning charges are already in menu prices and shown for info only, "
-                    "often in parentheses like '(9% GST : $3.68)'). "
-                    "false if grand total = subtotal + charges (charges added on top)\n"
+                    "- add_on_charges: GST/service charge lines that are actually added on top of menu prices and contribute to the amount payable\n"
+                    "- informational_charges: tax/service lines shown only for breakdown/info and already included in the payable amount; common clues are 'included', parentheses, or grand total not increasing by that amount\n"
+                    "- receipt_subtotal: copy the subtotal before add-on charges if it is explicitly visible; otherwise null\n"
+                    "- receipt_grand_total: copy the final amount payable exactly as shown on the receipt; do NOT invent or recompute it; if not visible, return null\n"
+                    "- Never use informational_charges to build a new total\n"
+                    "- If a receipt shows both informational GST and add-on service charge, keep them in separate arrays\n"
                     "- Skip sub-items that are part of a set meal (e.g. rice, salad that come with a set)\n"
                     "- Skip headers, footers, payment method lines\n"
                     "- Use the unit price, not the line total for multi-qty items"
@@ -379,16 +462,17 @@ def _gemini_ocr(image_bytes):
         # Strip markdown code fences if present
         text = re.sub(r'^```json\s*', '', text.strip())
         text = re.sub(r'\s*```$', '', text.strip())
-        result = json.loads(text)
-        # Validate structure
-        items = result.get("items", [])
-        charges = result.get("charges", [])
-        charges_included = result.get("charges_included", False)
-        if not items:
+        result = _normalize_gemini_result(json.loads(text))
+        if not result["items"]:
             print("[GEMINI] No items returned, falling back to PaddleOCR")
             return None
-        print(f"[GEMINI] Extracted {len(items)} items, {len(charges)} charges")
-        return {"items": items, "charges": charges, "charges_included": charges_included}
+        print(
+            f"[GEMINI] Extracted {len(result['items'])} items, "
+            f"{len(result['add_on_charges'])} add-on charges, "
+            f"{len(result['informational_charges'])} informational charges, "
+            f"grand_total={result['receipt_grand_total']}"
+        )
+        return result
     except Exception as e:
         print(f"[GEMINI] Failed: {e}, falling back to PaddleOCR")
         return None
@@ -451,4 +535,12 @@ def run_ocr(image_bytes):
         elif abs(grand_total - (food_subtotal + charges_total)) < 0.50:
             print(f"[OCR] Charges appear EXCLUDED from menu prices (grand total {grand_total} ≈ food {food_subtotal} + charges {charges_total})")
 
-    return {'items': food_items, 'charges': charges, 'charges_included': charges_included}
+    return {
+        'items': food_items,
+        'add_on_charges': [] if charges_included else charges,
+        'informational_charges': charges if charges_included else [],
+        'charges': charges,
+        'charges_included': charges_included,
+        'receipt_subtotal': round(food_subtotal, 2),
+        'receipt_grand_total': round(grand_total, 2) if grand_total is not None else None,
+    }

@@ -99,10 +99,14 @@ export async function setAutoRemind(
 
 export async function scanReceipt(file: File): Promise<{
   items?: { name: string; price: number; qty: number }[];
+  add_on_charges?: { name: string; price: number }[];
+  informational_charges?: { name: string; price: number }[];
   charges?: { name: string; price: number }[];
   charges_included?: boolean;
   subtotal?: number;
   total?: number;
+  computed_total?: number;
+  receipt_grand_total?: number | null;
   error?: string;
 }> {
   const formData = new FormData();
