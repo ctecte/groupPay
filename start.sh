@@ -1,7 +1,7 @@
 #!/bin/bash
 # GroupPay — start bot + tunnel in one command
-# Usage: ./start.sh              (reuses existing tunnel, or starts cloudflare)
-#        ./start.sh cloudflare   (force new cloudflare tunnel)
+# Usage: ./start.sh              (named tunnel → bot.grouppay.uk)
+#        ./start.sh cloudflare   (quick tunnel → random trycloudflare.com)
 #        ./start.sh ngrok        (uses ngrok with stable domain)
 #        ./start.sh ngrok-free   (uses ngrok free tier, random URL)
 cd "$(dirname "$0")"
@@ -20,28 +20,36 @@ source venv/bin/activate
 echo "Building frontend..."
 cd splitwize-spark && npx vite build 2>&1 | tail -1 && cd ..
 
+# Named Cloudflare Tunnel config
+CF_TUNNEL_NAME="grouppay"
+CF_TUNNEL_HOSTNAME="bot.grouppay.uk"
+CF_TUNNEL_ID="45ae2fc4-abff-48c9-a21d-c79fda73e46a"
+CF_CREDS="$HOME/.cloudflared/${CF_TUNNEL_ID}.json"
+
 # Check for existing tunnel
 EXISTING_URL=""
 if [ "$TUNNEL" = "auto" ]; then
-    # Check if cloudflared is already running
-    if pgrep -f cloudflared > /dev/null 2>&1; then
-        EXISTING_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log 2>/dev/null | head -1)
-        if [ -n "$EXISTING_URL" ]; then
-            echo "Reusing existing Cloudflare tunnel: $EXISTING_URL"
-            TUNNEL="reuse"
-        fi
-    fi
-    # No existing tunnel — start cloudflare
-    [ "$TUNNEL" = "auto" ] && TUNNEL="cloudflare"
+    # Default to named tunnel
+    TUNNEL="named"
 fi
 
-if [ "$TUNNEL" = "reuse" ]; then
-    WEBAPP_URL="$EXISTING_URL"
-elif [ "$TUNNEL" = "cloudflare" ]; then
-    # Kill old tunnel if starting fresh
+if [ "$TUNNEL" = "named" ]; then
+    # Kill old tunnel if running
     pkill -f cloudflared 2>/dev/null
     sleep 1
-    echo "Starting Cloudflare Tunnel..."
+    echo "Starting named Cloudflare Tunnel ($CF_TUNNEL_HOSTNAME)..."
+    nohup cloudflared tunnel --no-autoupdate \
+        --origincert "$HOME/.cloudflared/cert.pem" \
+        --credentials-file "$CF_CREDS" \
+        --url http://localhost:5000 \
+        run "$CF_TUNNEL_NAME" > cloudflared.log 2>&1 &
+    sleep 3
+    WEBAPP_URL="https://$CF_TUNNEL_HOSTNAME"
+elif [ "$TUNNEL" = "cloudflare" ]; then
+    # Quick tunnel (ephemeral trycloudflare.com URL)
+    pkill -f cloudflared 2>/dev/null
+    sleep 1
+    echo "Starting Cloudflare quick tunnel..."
     nohup cloudflared tunnel --url http://localhost:5000 > cloudflared.log 2>&1 &
     for i in $(seq 1 15); do
         WEBAPP_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1)
@@ -80,7 +88,7 @@ echo "Tunnel: $WEBAPP_URL"
 [ -f .env ] && export $(grep -v '^#' .env | xargs)
 
 # Start bot
-WEBAPP_URL="$WEBAPP_URL" nohup python -u bot.py > bot.log 2>&1 &
+WEBAPP_URL="$WEBAPP_URL" nohup ./venv/bin/python -u bot.py > bot.log 2>&1 &
 sleep 3
 
 # Verify with HTTP check
