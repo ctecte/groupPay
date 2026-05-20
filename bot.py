@@ -20,7 +20,7 @@ import qrcode
 import db
 from paynow_qr import generate_paynow_qr_data
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8061320633:AAEFegJpAs281zT4ySk20z2o_SHzh9tg3Rw")
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -50,6 +50,19 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Persistent store: chat_id -> {user_id: display_name}
 group_members: dict[int, dict[int, str]] = _load_members()
+
+
+def _log_message(label: str, msg):
+    user = getattr(msg, "from_user", None)
+    user_id = getattr(user, "id", None)
+    username = getattr(user, "username", None)
+    thread_id = getattr(msg, "message_thread_id", None)
+    print(
+        f"[{label}] chat_id={msg.chat.id} chat_type={msg.chat.type} "
+        f"thread_id={thread_id} user_id={user_id} username={username} "
+        f"text={getattr(msg, 'text', None)!r}",
+        flush=True,
+    )
 
 def _mention(name: str, telegram_id: str | None = None, chat_id: int | None = None) -> str:
     """Build a proper Telegram mention using tg://user?id= link.
@@ -692,42 +705,54 @@ def _thread_kwargs(msg) -> dict:
 
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
+    _log_message("CMD_START", msg)
     _track_member(msg)
-    bot.send_message(
-        msg.chat.id,
-        "👋 *Welcome to GroupPay!*\n\n"
-        "Split bills quickly and fairly with your group.\n\n"
-        "Tap the button below or use /split to open the app.",
-        parse_mode="Markdown",
-        reply_markup=_make_keyboard(msg),
-        **_thread_kwargs(msg),
-    )
+    try:
+        bot.send_message(
+            msg.chat.id,
+            "👋 *Welcome to GroupPay!*\n\n"
+            "Split bills quickly and fairly with your group.\n\n"
+            "Tap the button below or use /split to open the app.",
+            parse_mode="Markdown",
+            reply_markup=_make_keyboard(msg),
+            **_thread_kwargs(msg),
+        )
+    except Exception as e:
+        print(f"[CMD_START ERROR] chat_id={msg.chat.id}: {e}", flush=True)
 
 
 @bot.message_handler(commands=["split"])
 def cmd_split(msg):
+    _log_message("CMD_SPLIT", msg)
     _track_member(msg)
-    bot.send_message(
-        msg.chat.id,
-        "📢 *Let's split a bill!*\n\nTap below to open GroupPay:",
-        parse_mode="Markdown",
-        reply_markup=_make_keyboard(msg),
-        **_thread_kwargs(msg),
-    )
+    try:
+        bot.send_message(
+            msg.chat.id,
+            "📢 *Let's split a bill!*\n\nTap below to open GroupPay:",
+            parse_mode="Markdown",
+            reply_markup=_make_keyboard(msg),
+            **_thread_kwargs(msg),
+        )
+    except Exception as e:
+        print(f"[CMD_SPLIT ERROR] chat_id={msg.chat.id}: {e}", flush=True)
 
 
 @bot.message_handler(commands=["help"])
 def cmd_help(msg):
+    _log_message("CMD_HELP", msg)
     _track_member(msg)
-    bot.send_message(
-        msg.chat.id,
-        "*GroupPay Commands*\n\n"
-        "/start — Welcome & open the app\n"
-        "/split — Start a new bill split\n"
-        "/help — Show this help message",
-        parse_mode="Markdown",
-        **_thread_kwargs(msg),
-    )
+    try:
+        bot.send_message(
+            msg.chat.id,
+            "*GroupPay Commands*\n\n"
+            "/start — Welcome & open the app\n"
+            "/split — Start a new bill split\n"
+            "/help — Show this help message",
+            parse_mode="Markdown",
+            **_thread_kwargs(msg),
+        )
+    except Exception as e:
+        print(f"[CMD_HELP ERROR] chat_id={msg.chat.id}: {e}", flush=True)
 
 
 @bot.message_handler(content_types=["new_chat_members"])
@@ -817,6 +842,10 @@ def _auto_remind_loop():
                     db.cancel_auto_remind(session["id"])
                 except Exception as e:
                     print(f"[AUTO-REMIND ERROR] Session {session['id']}: {e}")
+                    err_msg = str(e).lower()
+                    if "upgraded to a supergroup" in err_msg or "chat not found" in err_msg:
+                        print(f"[AUTO-REMIND] Cancelling reminder for session {session['id']} (stale chat)")
+                        db.cancel_auto_remind(session["id"])
         except Exception as e:
             print(f"[AUTO-REMIND ERROR] Loop: {e}")
         _time.sleep(300)  # Check every 5 minutes
@@ -838,11 +867,25 @@ def telegram_webhook():
 def _setup_webhook():
     """Set Telegram webhook to point at our server."""
     webhook_url = f"{WEBAPP_URL}/webhook/{BOT_TOKEN}"
-    bot.remove_webhook()
     import time
-    time.sleep(0.5)
-    bot.set_webhook(url=webhook_url)
-    print(f"🔗 Webhook set: {webhook_url}")
+
+    last_error = None
+    for attempt in range(1, 9):
+        try:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            print(f"🔗 Webhook set: {webhook_url}")
+            return
+        except Exception as e:
+            last_error = e
+            wait = min(30, attempt * 5)
+            print(f"[WEBHOOK] Setup attempt {attempt}/8 failed: {e}")
+            if attempt < 8:
+                print(f"[WEBHOOK] Retrying in {wait}s...")
+                time.sleep(wait)
+
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
