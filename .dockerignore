@@ -1,0 +1,11 @@
+.env
+.git
+*.log
+*.md
+*.db
+splitwize-spark/node_modules
+splitwize-spark/dist
+__pycache__
+venv
+.gitignore
+uploads/

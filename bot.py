@@ -21,11 +21,13 @@ import db
 from paynow_qr import generate_paynow_qr_data
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
+WEBAPP_URL = os.environ["WEBAPP_URL"]
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-MEMBERS_FILE = os.path.join(os.path.dirname(__file__), "group_members.json")
+MEMBERS_FILE = os.path.join(DATA_DIR, "group_members.json")
 
 
 def _load_members() -> dict[int, dict[int, str]]:

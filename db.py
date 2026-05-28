@@ -5,8 +5,8 @@ import os
 import uuid
 from datetime import datetime
 
-DB_PATH = os.environ.get("DB_PATH", "grouppay.db")
-
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DB_PATH = os.path.join(DATA_DIR, "grouppay.db")
 
 def _connect():
     conn = sqlite3.connect(DB_PATH)
