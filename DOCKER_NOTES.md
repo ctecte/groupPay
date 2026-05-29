@@ -4,5 +4,9 @@ group_members.json needs a volume too
 
 
 # Bug list
-Group members that left will still be tracked in the group_members.json. 
-Dont append the member list to the entire URL. 
+Dont append the member list to the entire URL
+
+# Feature List
+Blame should be assigned clearly, reflected in the created split page so people can verify their items are correct, or maybe in the telegram message for the bill (might be spammy?)
+Blame shoud also be reflected on the paynow screenshot page. 
+Paynow qr page should be collapsed and more mobile friendly so no scrolling is needed to see the download button

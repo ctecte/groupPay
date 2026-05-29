@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell, X } from 'lucide-react';
-import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt, setAutoRemind } from '@/lib/api';
+import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt, setAutoRemind, getMembers } from '@/lib/api';
 
 export default function GroupPayPrototype() {
   const [step, setStep] = useState('start');
@@ -133,24 +133,16 @@ export default function GroupPayPrototype() {
       });
     }
 
-    // Parse ?members= from URL
-    const membersParam = params.get('members');
-    if (membersParam) {
-      const parsed = membersParam.split(',').map(entry => {
-        const lastColon = entry.lastIndexOf(':');
-        if (lastColon === -1) return { name: decodeURIComponent(entry), id: '' };
-        const name = entry.slice(0, lastColon);
-        const id = entry.slice(lastColon + 1);
-        return { name: decodeURIComponent(name), id: id || '' };
-      }).filter(m => m.name);
-      setKnownMembers(parsed);
-
-      // If in TMA, find our own entry by Telegram ID and set it
-      // (even if user changes their display name later)
-      if (tgUserId) {
-        const me = parsed.find(m => m.id === tgUserId);
-        if (me) setMyTelegramId(tgUserId);
-      }
+    // Fetch members from API using chat_id
+    const chatId = params.get('chat_id');
+    if (chatId) {
+      getMembers(chatId).then(members => {
+        setKnownMembers(members);
+        if (tgUserId) {
+          const me = members.find(m => m.id === tgUserId);
+          if (me) setMyTelegramId(tgUserId);
+        }
+      }).catch(() => {});
     }
   }, []);
 

@@ -89,6 +89,12 @@ app = Flask(__name__, static_folder=DIST_DIR, static_url_path="")
 CORS(app)
 
 
+@app.route("/api/members/<chat_id>")
+def api_get_members(chat_id):
+    members = group_members.get(int(chat_id), {})
+    return jsonify([{"name": name, "id": str(uid)} for uid, name in members.items()])
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_spa(path):
@@ -598,14 +604,10 @@ def _track_member(msg):
 
 
 def _build_webapp_url(chat_id: int, thread_id: int | None = None) -> str:
-    """Build webapp URL with known members, chat_id, and thread_id as query params."""
-    members = group_members.get(chat_id, {})
+    """Build webapp URL with chat_id and thread_id as query params."""
     parts_list = [f"chat_id={chat_id}"]
     if thread_id:
         parts_list.append(f"thread_id={thread_id}")
-    if members:
-        member_str = ",".join(f"{quote(name)}:{uid}" for uid, name in members.items())
-        parts_list.append(f"members={member_str}")
     sep = "&" if "?" in WEBAPP_URL else "?"
     return f"{WEBAPP_URL}{sep}{'&'.join(parts_list)}"
 

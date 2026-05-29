@@ -119,6 +119,12 @@ export async function scanReceipt(file: File): Promise<{
   return res.json();
 }
 
+export async function getMembers(chatId: string): Promise<{ name: string; id: string }[]> {
+  const res = await fetch(`${API_BASE}/members/${chatId}`);
+  if (!res.ok) throw new Error(`Failed to get members: ${res.statusText}`);
+  return res.json();
+}
+
 export function qrUrl(sessionId: string, participantName: string): string {
   return `${API_BASE}/sessions/${sessionId}/qr/${encodeURIComponent(participantName)}`;
 }
