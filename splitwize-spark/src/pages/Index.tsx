@@ -112,6 +112,7 @@ export default function GroupPayPrototype() {
   const [ocrEditing, setOcrEditing] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const sessionCreatedRef = useRef(false);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
   const [screenshotUploaded, setScreenshotUploaded] = useState(false);
@@ -873,13 +874,16 @@ export default function GroupPayPrototype() {
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Scan Your Receipt</h2>
             <p className="text-blue-200 text-sm mb-6">Upload a clear image of your receipt, and try again if the scan is incorrect</p>
+            {/* capture="environment" opens the rear camera directly in the TMA webview */}
+            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
             <input ref={galleryInputRef} type="file" accept="image/*" onChange={handleFileSelect} className="hidden" />
             <div className="relative bg-black/40 rounded-2xl p-4 mb-6 aspect-[3/4] flex items-center justify-center border-2 border-dashed border-blue-400/50">
               {!ocrScanning ? (
-                <div className="text-center">
+                <div className="text-center w-full px-4">
                   <Camera className="text-blue-400 mx-auto mb-4" size={64} />
-                  <p className="text-white/70 text-sm mb-6">Please upload a clear image of the receipt</p>
-                  <button onClick={() => galleryInputRef.current?.click()} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold w-full">📁 Upload Receipt</button>
+                  <p className="text-white/70 text-sm mb-6">Snap or upload a clear image of the receipt</p>
+                  <button onClick={() => cameraInputRef.current?.click()} className="btn-primary text-white px-8 py-3 rounded-xl font-semibold w-full mb-3">📷 Take Photo</button>
+                  <button onClick={() => galleryInputRef.current?.click()} className="btn-secondary text-white px-8 py-3 rounded-xl font-semibold w-full">📁 Choose from Gallery</button>
                   {ocrError && (
                     <div className="mt-4 bg-red-500/10 rounded-xl p-3 border border-red-400/30">
                       <p className="text-red-200 text-sm">{ocrError}</p>
