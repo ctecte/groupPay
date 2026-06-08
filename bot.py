@@ -370,7 +370,10 @@ def api_remind(session_id):
                 f"🔔 <b>Payment Reminder</b>\n\n"
                 f"For <b>{session['event_name']}</b> organized by {payee_mention}:\n\n"
                 f"{names}\n\n"
-                f"Please pay soon! 🙏",
+                f"Please pay soon! 🙏\n\n"
+                f"<i>Already paid? Upload a payment screenshot to confirm, or ask "
+                f"{payee_mention} to mark you paid (via the “Mark paid” button after "
+                f"you unlock your personal QR).</i>",
                 parse_mode="HTML",
                 reply_markup=kb,
                 **tid_kwargs,
@@ -948,7 +951,10 @@ def _auto_remind_loop():
                         f"🔔 <b>Auto-Reminder</b>\n\n"
                         f"For <b>{session['event_name']}</b> organized by {payee_mention}:\n\n"
                         f"{names}\n\n"
-                        f"Please pay soon! 🙏",
+                        f"Please pay soon! 🙏\n\n"
+                        f"<i>Already paid? Upload a payment screenshot to confirm, or ask "
+                        f"{payee_mention} to mark you paid (via the “Mark paid” button after "
+                        f"you unlock your personal QR).</i>",
                         parse_mode="HTML",
                         reply_markup=kb,
                         **tid_kwargs,
