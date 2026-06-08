@@ -1318,7 +1318,7 @@ export default function GroupPayPrototype() {
             <div className="bg-amber-500/10 rounded-xl p-4 border border-amber-400/20 mb-6">
               <div className="text-amber-300 text-xs font-semibold mb-1">Please confirm your details</div>
               <div className="space-y-1 text-sm">
-                <div className="flex justify-between"><span className="text-white/60">Payee:</span><span className="text-white mono">@{currentUser}</span></div>
+                <div className="flex justify-between"><span className="text-white/60">Collector:</span><span className="text-white mono">@{currentUser}</span></div>
                 <div className="flex justify-between"><span className="text-white/60">PayNow:</span><span className="text-white mono">{payeePhone.length === 8 ? `+65 ${payeePhone.slice(0,4)} ${payeePhone.slice(4)}` : '—'}</span></div>
                 <div className="flex justify-between"><span className="text-white/60">Event:</span><span className="text-white">{eventName}</span></div>
               </div>
@@ -1539,7 +1539,7 @@ export default function GroupPayPrototype() {
                   return (
                     <div key={person} className="flex justify-between items-center py-1.5 border-b border-white/5 last:border-0">
                       <div>
-                        <div className="text-white text-sm font-medium">{person}{person === currentUser ? ' (payee)' : ''}</div>
+                        <div className="text-white text-sm font-medium">{person}{person === currentUser ? ' (collector)' : ''}</div>
                         {charges > 0.005 && <div className="text-white/40 text-[10px] mono">${food.toFixed(2)} + ${charges.toFixed(2)} charges</div>}
                       </div>
                       <div className={`mono font-bold text-sm ${final_ > 0 ? 'text-green-400' : 'text-white/30'}`}>
@@ -1858,7 +1858,7 @@ export default function GroupPayPrototype() {
                 return (
                   <div key={person} className={`rounded-xl p-4 ${isPayee ? 'bg-blue-500/10 border border-blue-400/20' : 'bg-white/5'}`}>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-white mono text-sm">@{person} {isPayee && <span className="text-blue-300 text-xs">(Payee)</span>}</span>
+                      <span className="text-white mono text-sm">@{person} {isPayee && <span className="text-blue-300 text-xs">(Collector)</span>}</span>
                       {useMenuPriceMode ? (
                         <span className="text-green-400 mono text-xs font-semibold">
                           {personMenuSum > 0 ? `$${personMenuSum.toFixed(2)} → $${personFinal}` : ''}
@@ -2024,7 +2024,7 @@ export default function GroupPayPrototype() {
                 <div className="flex justify-between items-center bg-blue-500/10 rounded-lg px-3 py-2.5 border border-blue-400/20 mb-2">
                   <div className="flex items-center gap-2">
                     <span className="text-white mono text-sm">@{currentUser}</span>
-                    <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Payee</span>
+                    <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Collector</span>
                   </div>
                   <span className="text-blue-400 mono font-semibold">${getResolvedAmount(currentUser)}</span>
                 </div>
@@ -2051,7 +2051,7 @@ export default function GroupPayPrototype() {
                       <div className="flex justify-between items-center mb-1">
                         <div className="flex items-center gap-2">
                           <span className="text-white mono text-sm">@{person}</span>
-                          {person === currentUser && <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Payee</span>}
+                          {person === currentUser && <span className="text-blue-300 text-[10px] bg-blue-500/20 px-1.5 py-0.5 rounded">Collector</span>}
                         </div>
                         <div className="flex items-center gap-2">
                           {shareCount && <span className="text-white/40 text-xs">{shareCount} shares</span>}

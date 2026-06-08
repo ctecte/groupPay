@@ -178,7 +178,7 @@ def api_create_session():
             # Build breakdown lines — include payee's share
             payee_amount = data.get("payee_amount", "0.00")
             payee_mention = _mention(data["payee"], chat_id=cid)
-            breakdown_lines = [f"  • {payee_mention} — <b>${payee_amount}</b> (payee)"]
+            breakdown_lines = [f"  • {payee_mention} — <b>${payee_amount}</b> (collector)"]
             breakdown_lines += [
                 f"  • {_mention(p['name'], p.get('telegram_id'), cid)} — <b>${p['amount']}</b>"
                 for p in data["participants"]
@@ -283,7 +283,7 @@ def api_update_status(session_id, name):
     if caller_tid:
         session = db.get_session(session_id)
         if session and session.get("payee_telegram_id") and str(caller_tid) != str(session["payee_telegram_id"]):
-            return jsonify({"error": "Only the payee can mark payments"}), 403
+            return jsonify({"error": "Only the collector can mark payments"}), 403
     ok = db.update_participant_status(session_id, name, data["status"])
     if not ok:
         return jsonify({"error": "Participant not found"}), 404
