@@ -135,10 +135,15 @@ def api_create_session():
         flush=True,
     )
 
-    # Persist itemized receipt + assignments (only present for OCR-scanned bills)
-    # as a JSON blob for display-only cross-checking on the View Split page.
+    # Persist itemized breakdown + assignments as a JSON blob for display-only
+    # cross-checking on the View Split page. Stores both the legacy flat `items`
+    # list and the multi-receipt `receipts` sections when present.
     items = data.get("items")
-    items_json = json.dumps(items) if items else None
+    receipts = data.get("receipts")
+    items_blob = None
+    if items or receipts:
+        items_blob = {"items": items or [], "receipts": receipts or []}
+    items_json = json.dumps(items_blob) if items_blob else None
 
     session = db.create_session(
         event_name=data["event_name"],
@@ -181,6 +186,16 @@ def api_create_session():
             breakdown = "\n".join(breakdown_lines)
             total = data["bill_amount"]
 
+            # When the split combines multiple bills, list each bill + its total
+            # so the group sees the breakdown, not just the event name.
+            bills_section = ""
+            if receipts and len(receipts) > 1:
+                bill_lines = "\n".join(
+                    f"  • {r.get('label') or f'Bill {i + 1}'} — <b>${r.get('total', 0):.2f}</b>"
+                    for i, r in enumerate(receipts)
+                )
+                bills_section = f"\n🧾 <b>Bills ({len(receipts)}):</b>\n{bill_lines}\n"
+
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("💰 View Split", url=session_url))
             bot.send_message(
@@ -188,7 +203,8 @@ def api_create_session():
                 f"📢 <b>Bill Split Created!</b>\n\n"
                 f"Event: <b>{data['event_name']}</b>\n"
                 f"Total: <b>${total}</b>\n"
-                f"Organized by: {payee_mention}\n\n"
+                f"Organized by: {payee_mention}\n"
+                f"{bills_section}\n"
                 f"💸 <b>Who owes what:</b>\n{breakdown}",
                 parse_mode="HTML",
                 reply_markup=kb,
@@ -242,9 +258,18 @@ def api_get_session(session_id):
             p["screenshot_url"] = f"/api/sessions/{session_id}/participants/{quote(p['name'])}/screenshot"
         else:
             p["screenshot_url"] = None
-    # Parse the itemized breakdown JSON blob back into an object (None if not OCR)
+    # Parse the itemized breakdown JSON blob. Supports both the old format (a bare
+    # items array) and the new format ({items, receipts}).
     items_raw = session.pop("items_json", None)
-    session["items"] = json.loads(items_raw) if items_raw else None
+    session["items"] = None
+    session["receipts"] = None
+    if items_raw:
+        blob = json.loads(items_raw)
+        if isinstance(blob, list):
+            session["items"] = blob
+        elif isinstance(blob, dict):
+            session["items"] = blob.get("items") or None
+            session["receipts"] = blob.get("receipts") or None
     return jsonify(session)
 
 

@@ -1,6 +1,75 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Camera, Users, DollarSign, CheckCircle, XCircle, Clock, QrCode, ArrowRight, ArrowLeft, Edit2, Bell, X } from 'lucide-react';
-import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt, setAutoRemind, getMembers } from '@/lib/api';
+import { createSession, getSession, updatePaymentStatus, uploadScreenshot, sendReminders, qrUrl, scanReceipt, setAutoRemind, getMembers, type SplitReceipt } from '@/lib/api';
+
+// ---- Receipt model (self-contained unit; multiple receipts combine per person) ----
+// Each receipt owns its own items, discount, service charge, GST and per-item
+// blame assignments. Charges never leak between receipts — each applies its own
+// discount→svc→GST ordering on its own subtotal, so a receipt with no discount
+// or no GST just has those switched off.
+interface ReceiptItem { name: string; price: number; qty: number }
+interface Receipt {
+  label: string;                                 // user-given name, e.g. "Drinks"
+  items: ReceiptItem[];
+  charges: { name: string; price: number }[];   // misc flat add-ons (e.g. corkage)
+  infoCharges: { name: string; price: number }[]; // display-only, already-included
+  chargesIncluded: boolean;                      // display flag for infoCharges
+  serviceOn: boolean; serviceRate: number;
+  gstOn: boolean; gstRate: number;
+  discount: number; discountIsPercent: boolean;
+  assignments: Record<number, string[]>;         // expanded-item index → assignees
+  grandTotalHint: number | null;                 // printed receipt total, for cross-check
+  isManual: boolean;
+}
+
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+// Expand items by qty into one entry per unit (mirrors the assignment indexing).
+const expandReceiptItems = (r: Receipt) =>
+  r.items.flatMap((item) => {
+    const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
+    return Array.from({ length: qty }, (_, unitIdx) => ({
+      name: qty > 1 ? `${item.name} (${unitIdx + 1}/${qty})` : item.name,
+      price: item.price,
+    }));
+  });
+
+// Ordered totals for a single receipt. Charge components are rounded to cents
+// BEFORE summing — matches how receipts print (svc $4.82, not $4.815).
+const receiptTotals = (r: Receipt) => {
+  const subtotal = r.items.reduce((s, i) => s + i.price * i.qty, 0);
+  const discount = round2(r.discountIsPercent ? subtotal * (r.discount / 100) : r.discount);
+  const discountedBase = Math.max(0, subtotal - discount);
+  const svc = r.serviceOn ? round2(discountedBase * (r.serviceRate / 100)) : 0;
+  const gst = r.gstOn ? round2((discountedBase + svc) * (r.gstRate / 100)) : 0;
+  const flat = r.charges.reduce((s, c) => s + c.price, 0);
+  const total = round2(discountedBase + svc + gst + flat);
+  return { subtotal, discount, discountedBase, svc, gst, flat, total };
+};
+
+// One person's RAW (unrounded) share of a single receipt, given their food total
+// in that receipt. Discount allocated proportionally to food share, then svc/GST.
+const personReceiptRaw = (r: Receipt, personFood: number) => {
+  const t = receiptTotals(r);
+  if (t.subtotal <= 0) return 0;
+  const ratio = personFood / t.subtotal;
+  const personDiscounted = personFood - ratio * t.discount;
+  const svc = r.serviceOn ? personDiscounted * (r.serviceRate / 100) : 0;
+  const gst = r.gstOn ? (personDiscounted + svc) * (r.gstRate / 100) : 0;
+  const flat = ratio * t.flat;
+  return personDiscounted + svc + gst + flat;
+};
+
+// Per-person food total within one receipt from its assignments (shared = even).
+const personFoodInReceipt = (r: Receipt, person: string) => {
+  const expanded = expandReceiptItems(r);
+  let total = 0;
+  expanded.forEach((item, idx) => {
+    const assignees = r.assignments[idx] || [];
+    if (assignees.includes(person)) total += item.price / assignees.length;
+  });
+  return total;
+};
 
 export default function GroupPayPrototype() {
   const [step, setStep] = useState('start');
@@ -31,6 +100,13 @@ export default function GroupPayPrototype() {
   const [manualMode, setManualMode] = useState<'choice' | 'total'>('choice');
   // True when the itemized editor was reached via manual entry (no receipt scan)
   const [isManualItems, setIsManualItems] = useState(false);
+  // Committed receipts (multi-receipt support). The flat ocr* state above is the
+  // "draft" receipt currently being edited; on confirm it's snapshotted in here.
+  // editingReceiptIndex >= 0 means the draft is editing an existing committed receipt.
+  const [committedReceipts, setCommittedReceipts] = useState<Receipt[]>([]);
+  const [editingReceiptIndex, setEditingReceiptIndex] = useState<number>(-1);
+  // User-given name for the draft bill being edited (defaults to the event name).
+  const [draftLabel, setDraftLabel] = useState('');
   const [ocrReceiptGrandTotal, setOcrReceiptGrandTotal] = useState<number | null>(null);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrEditing, setOcrEditing] = useState(false);
@@ -89,6 +165,7 @@ export default function GroupPayPrototype() {
 
   // Itemized breakdown loaded from a restored session (OCR bills only)
   const [splitItems, setSplitItems] = useState<{ name: string; price: number; qty: number; assignees: string[] }[] | null>(null);
+  const [splitReceipts, setSplitReceipts] = useState<SplitReceipt[] | null>(null);
 
   // File input ref for screenshot upload
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -142,6 +219,7 @@ export default function GroupPayPrototype() {
         setScreenshotUrls(screenshots);
         if (session.remind_after_hours) setAutoRemindHours(session.remind_after_hours);
         if (session.items) setSplitItems(session.items);
+        if (session.receipts) setSplitReceipts(session.receipts);
         setSplitConfirmed(true);
         setStep('overview');
       }).catch(() => {
@@ -239,32 +317,47 @@ export default function GroupPayPrototype() {
   };
 
   // ---- Itemized charge model (shared by ocr-result + item-assign) ----
-  // Ordered: (subtotal − discount) × (1 + svc%) × (1 + gst%) + flat add-on charges.
-  // Charge components are rounded to cents BEFORE summing — this matches how
-  // receipts compute (svc shown as $4.82, not $4.815), so our total matches the
-  // printed grand total exactly instead of drifting a cent.
-  const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-  const itemizedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
-  const itemizedDiscount = round2(ocrDiscountIsPercent
-    ? itemizedSubtotal * (ocrDiscount / 100)
-    : ocrDiscount);
-  const itemizedDiscountedBase = Math.max(0, itemizedSubtotal - itemizedDiscount);
-  const itemizedSvc = ocrServiceOn ? round2(itemizedDiscountedBase * (ocrServiceRate / 100)) : 0;
-  const itemizedGst = ocrGstOn ? round2((itemizedDiscountedBase + itemizedSvc) * (ocrGstRate / 100)) : 0;
-  const itemizedFlatCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
-  const itemizedTotal = round2(itemizedDiscountedBase + itemizedSvc + itemizedGst + itemizedFlatCharges);
-
-  // Per-person itemized total (raw, unrounded) given their food share.
-  const personItemizedRaw = (personFood: number) => {
-    if (itemizedSubtotal <= 0) return 0;
-    const ratio = personFood / itemizedSubtotal;
-    const personDiscounted = personFood - ratio * itemizedDiscount;
-    const svc = ocrServiceOn ? personDiscounted * (ocrServiceRate / 100) : 0;
-    const gst = ocrGstOn ? (personDiscounted + svc) * (ocrGstRate / 100) : 0;
-    const flat = ratio * itemizedFlatCharges;
-    return personDiscounted + svc + gst + flat;
+  // The flat ocr* state is the "draft" receipt currently being edited. Build a
+  // Receipt view of it so the editor and the pure per-receipt math share one model.
+  const draftReceipt: Receipt = {
+    label: draftLabel,
+    items: ocrItems,
+    charges: ocrCharges,
+    infoCharges: ocrInformationalCharges,
+    chargesIncluded: ocrChargesIncluded,
+    serviceOn: ocrServiceOn, serviceRate: ocrServiceRate,
+    gstOn: ocrGstOn, gstRate: ocrGstRate,
+    discount: ocrDiscount, discountIsPercent: ocrDiscountIsPercent,
+    assignments: itemAssignments,
+    grandTotalHint: ocrReceiptGrandTotal,
+    isManual: isManualItems,
   };
-  const personItemizedTotal = (personFood: number) => round2(personItemizedRaw(personFood));
+  const draftT = receiptTotals(draftReceipt);
+  // Display aliases used throughout the ocr-result editor (single-receipt view).
+  const itemizedSubtotal = draftT.subtotal;
+  const itemizedDiscount = draftT.discount;
+  const itemizedSvc = draftT.svc;
+  const itemizedGst = draftT.gst;
+  const itemizedFlatCharges = draftT.flat;
+  const itemizedTotal = draftT.total;
+
+  // All receipts in this session = committed ones plus the draft being edited,
+  // unless the draft is editing an existing committed receipt (then it's already
+  // represented by index and we substitute it).
+  const allReceiptsForTotals = (): Receipt[] => {
+    if (editingReceiptIndex >= 0) {
+      return committedReceipts.map((r, i) => i === editingReceiptIndex ? draftReceipt : r);
+    }
+    return [...committedReceipts, draftReceipt];
+  };
+
+  // Combined RAW per-person total across every receipt (no rounding yet).
+  const personCombinedRaw = (person: string, receipts: Receipt[]) =>
+    receipts.reduce((sum, r) => sum + personReceiptRaw(r, personFoodInReceipt(r, person)), 0);
+
+  // Combined session total across receipts (rounded).
+  const combinedSessionTotal = (receipts: Receipt[]) =>
+    round2(receipts.reduce((s, r) => s + receiptTotals(r).total, 0));
 
   // Settlement progress
   const paidCount = participants.filter(p => p.trim() && paymentStatuses[p] === 'paid').length;
@@ -440,6 +533,7 @@ export default function GroupPayPrototype() {
     setPaymentHistory([]);
     setSessionId(null);
     setSplitItems(null);
+    setSplitReceipts(null);
     setOcrServiceOn(false);
     setOcrGstOn(false);
     setOcrServiceRate(10);
@@ -448,6 +542,9 @@ export default function GroupPayPrototype() {
     setOcrDiscountIsPercent(false);
     setManualMode('choice');
     setIsManualItems(false);
+    setCommittedReceipts([]);
+    setEditingReceiptIndex(-1);
+    setDraftLabel('');
     sessionCreatedRef.current = false;
   };
 
@@ -501,25 +598,33 @@ export default function GroupPayPrototype() {
     const chatId = params.get('chat_id') || undefined;
     const threadId = params.get('thread_id') || undefined;
 
-    // Build itemized breakdown for cross-checking (only when OCR items exist).
-    // Mirror the expand-by-qty indexing used on the item-assign screen so the
-    // assignees line up with itemAssignments.
-    let itemsPayload: { name: string; price: number; qty: number; assignees: string[] }[] | undefined;
-    if (ocrItems.length > 0) {
-      const expanded = ocrItems.flatMap((item) => {
-        const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
-        return Array.from({ length: qty }, (_, unitIdx) => ({
-          name: qty > 1 ? `${item.name} (${unitIdx + 1}/${qty})` : item.name,
-          price: item.price,
-        }));
-      });
-      itemsPayload = expanded.map((item, idx) => ({
-        name: item.name,
-        price: item.price,
-        qty: 1,
-        assignees: itemAssignments[idx] || [],
-      }));
-    }
+    // Build itemized breakdown for cross-checking from the committed receipts.
+    // receiptsPayload = per-receipt sections; itemsPayload = legacy flat list
+    // (all receipts' items concatenated) for backward compatibility.
+    const receiptsPayload = committedReceipts.length > 0
+      ? committedReceipts.map((r, i) => {
+          const t = receiptTotals(r);
+          const expanded = expandReceiptItems(r).map((item, idx) => ({
+            name: item.name, price: item.price, qty: 1,
+            assignees: r.assignments[idx] || [],
+          }));
+          return {
+            label: r.label || `Bill ${i + 1}`,
+            items: expanded,
+            subtotal: round2(t.subtotal),
+            discount: t.discount,
+            serviceRate: r.serviceOn ? r.serviceRate : null,
+            service: t.svc,
+            gstRate: r.gstOn ? r.gstRate : null,
+            gst: t.gst,
+            flat: round2(t.flat),
+            total: t.total,
+          };
+        })
+      : undefined;
+    const itemsPayload = receiptsPayload
+      ? receiptsPayload.flatMap(r => r.items)
+      : undefined;
 
     try {
       const session = await createSession({
@@ -534,9 +639,11 @@ export default function GroupPayPrototype() {
         chat_id: chatId,
         thread_id: threadId,
         items: itemsPayload,
+        receipts: receiptsPayload,
       });
       setSessionId(session.id);
       if (itemsPayload) setSplitItems(itemsPayload);
+      if (receiptsPayload) setSplitReceipts(receiptsPayload);
       // Update URL so this session is bookmarkable/revisitable
       const url = new URL(window.location.href);
       url.searchParams.set('session', session.id);
@@ -546,6 +653,110 @@ export default function GroupPayPrototype() {
       sessionCreatedRef.current = false;
       // API might not be available, continue with local state
     }
+  };
+
+  // ---- Multi-receipt helpers ----
+
+  // Snapshot the draft (flat ocr* state) into committedReceipts. If the draft was
+  // editing an existing receipt, replace it; otherwise append. Returns the new array.
+  const commitDraftReceipt = (): Receipt[] => {
+    const snapshot: Receipt = {
+      // Fall back to the event name, then a positional label, if left blank.
+      label: draftLabel.trim() || eventName.trim() || `Bill ${(editingReceiptIndex >= 0 ? editingReceiptIndex : committedReceipts.length) + 1}`,
+      items: ocrItems.filter(i => i.name.trim() && i.price > 0),
+      charges: ocrCharges,
+      infoCharges: ocrInformationalCharges,
+      chargesIncluded: ocrChargesIncluded,
+      serviceOn: ocrServiceOn, serviceRate: ocrServiceRate,
+      gstOn: ocrGstOn, gstRate: ocrGstRate,
+      discount: ocrDiscount, discountIsPercent: ocrDiscountIsPercent,
+      assignments: itemAssignments,
+      grandTotalHint: ocrReceiptGrandTotal,
+      isManual: isManualItems,
+    };
+    let next: Receipt[];
+    if (editingReceiptIndex >= 0) {
+      next = committedReceipts.map((r, i) => i === editingReceiptIndex ? snapshot : r);
+    } else {
+      next = [...committedReceipts, snapshot];
+    }
+    setCommittedReceipts(next);
+    return next;
+  };
+
+  // Reset the draft to a blank manual receipt for adding the next bill.
+  const resetDraftForNewReceipt = () => {
+    setOcrItems([]);
+    setOcrCharges([]);
+    setOcrInformationalCharges([]);
+    setOcrChargesIncluded(false);
+    setOcrReceiptGrandTotal(null);
+    setOcrServiceOn(false);
+    setOcrServiceRate(10);
+    setOcrGstOn(false);
+    setOcrGstRate(9);
+    setOcrDiscount(0);
+    setOcrDiscountIsPercent(false);
+    setItemAssignments({});
+    setOcrEditing(false);
+    setIsManualItems(false);
+    setEditingReceiptIndex(-1);
+    setDraftLabel('');
+  };
+
+  // Load a committed receipt back into the draft for editing.
+  const loadReceiptIntoDraft = (index: number) => {
+    const r = committedReceipts[index];
+    if (!r) return;
+    setDraftLabel(r.label || '');
+    setOcrItems(r.items);
+    setOcrCharges(r.charges);
+    setOcrInformationalCharges(r.infoCharges || []);
+    setOcrChargesIncluded(r.chargesIncluded || false);
+    setOcrServiceOn(r.serviceOn); setOcrServiceRate(r.serviceRate);
+    setOcrGstOn(r.gstOn); setOcrGstRate(r.gstRate);
+    setOcrDiscount(r.discount); setOcrDiscountIsPercent(r.discountIsPercent);
+    setItemAssignments(r.assignments);
+    setOcrReceiptGrandTotal(r.grandTotalHint);
+    setIsManualItems(r.isManual);
+    setOcrEditing(false);
+    setEditingReceiptIndex(index);
+  };
+
+  // Compute final per-person amounts across all receipts. Sum each person's RAW
+  // share across receipts, round once: non-payees ceil'd up (so the payee never
+  // recovers less than owed), payee takes the remainder.
+  const computeFinalAmounts = (receipts: Receipt[]) => {
+    const ceil2 = (n: number) => Math.ceil((n - Number.EPSILON) * 100) / 100;
+    const total = combinedSessionTotal(receipts);
+    const amounts: Record<string, number> = {};
+    let othersSum = 0;
+    otherParticipants.forEach(name => {
+      const amt = ceil2(personCombinedRaw(name, receipts));
+      amounts[name] = amt;
+      othersSum += amt;
+    });
+    // Payee takes the remainder. Clamp to 0: with many participants/receipts the
+    // accumulated ceil surplus can exceed the rounded total, which would otherwise
+    // show the payee a negative owed amount.
+    amounts[currentUser] = Math.max(0, round2(total - othersSum));
+    return { amounts, total };
+  };
+
+  // Finish adding receipts → compute combined split → go to review.
+  const finishReceipts = () => {
+    const receipts = commitDraftReceipt();
+    const { amounts, total } = computeFinalAmounts(receipts);
+    const strAmounts: Record<string, string> = {};
+    Object.entries(amounts).forEach(([k, v]) => { strAmounts[k] = v.toFixed(2); });
+    setCustomAmounts(strAmounts);
+    setEvenSplit(false);
+    // Itemized splits resolve via customAmounts; force splitMethod to 'amount' so
+    // getResolvedAmount reads them (not stale percentage/shares from an earlier path).
+    setSplitMethod('amount');
+    setBillAmount(total.toFixed(2));
+    resetDraftForNewReceipt();
+    setStep('review-split');
   };
 
   // If not in TMA, show "Open via Telegram" message
@@ -639,12 +850,21 @@ export default function GroupPayPrototype() {
         {/* OCR Choice */}
         {step === 'ocr-choice' && (
           <div className="glass rounded-3xl p-8 animate-in">
-            <h2 className="text-white text-xl font-bold mb-6">How do you want to enter the bill?</h2>
-            <div className="space-y-3">
+            <h2 className="text-white text-xl font-bold mb-2">{committedReceipts.length > 0 ? `Add bill #${committedReceipts.length + 1}` : 'How do you want to enter the bill?'}</h2>
+            {committedReceipts.length > 0 && (
+              <p className="text-blue-200 text-sm mb-4">{committedReceipts.length} {committedReceipts.length === 1 ? 'bill' : 'bills'} already added (${combinedSessionTotal(committedReceipts).toFixed(2)} so far)</p>
+            )}
+            <div className="space-y-3 mt-4">
               <button onClick={() => setStep('ocr-scan')} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Camera size={20} /><span>Scan Receipt (OCR)</span></div><ArrowRight size={20} /></button>
               <button onClick={() => setStep('manual-bill')} className="w-full btn-secondary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"><div className="flex items-center gap-3"><Edit2 size={20} /><span>Enter Manually</span></div><ArrowRight size={20} /></button>
             </div>
-            <button onClick={() => setStep('start')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+            {/* When adding a 2nd+ bill, Back returns to the review of bills so far,
+                not the start screen (which would orphan the committed receipts). */}
+            {committedReceipts.length > 0 ? (
+              <button onClick={() => setStep('review-split')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back to bills so far</button>
+            ) : (
+              <button onClick={() => setStep('start')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+            )}
           </div>
         )}
 
@@ -721,6 +941,18 @@ export default function GroupPayPrototype() {
               <button onClick={() => setOcrEditing(!ocrEditing)} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${ocrEditing ? 'bg-blue-500/20 border-blue-400/50 text-blue-300' : 'bg-white/5 border-white/15 text-white/50 hover:text-white'}`}>
                 <Edit2 size={14} className="inline mr-1" />{ocrEditing ? 'Done' : 'Edit'}
               </button>
+            </div>
+
+            {/* Bill name — defaults to the event name; lets users distinguish bills */}
+            <div className="mb-4">
+              <label className="text-white/40 text-[10px] uppercase tracking-wider">Bill name</label>
+              <input
+                type="text"
+                value={draftLabel}
+                onChange={(e) => setDraftLabel(e.target.value)}
+                placeholder={eventName || 'e.g. Dinner, Drinks'}
+                className="w-full bg-white/10 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none mt-1"
+              />
             </div>
 
             {!ocrEditing ? (
@@ -847,7 +1079,10 @@ export default function GroupPayPrototype() {
                     setOcrItems(namedItems);
                     setOcrSubtotal(computedSubtotal);
                     setBillAmount(computedTotal.toFixed(2));
-                    setStep('who-paid');
+                    // Payee + group are set once on the first receipt. Receipts 2+
+                    // (or editing an existing one) skip straight to assignment.
+                    const payeeAlreadySet = committedReceipts.length > 0 || editingReceiptIndex >= 0;
+                    setStep(payeeAlreadySet ? 'item-assign' : 'who-paid');
                   }}
                   className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -855,7 +1090,9 @@ export default function GroupPayPrototype() {
                 </button>
               );
             })()}
-            {isManualItems ? (
+            {editingReceiptIndex >= 0 ? (
+              <button onClick={() => { resetDraftForNewReceipt(); setStep('review-split'); }} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Cancel edit</button>
+            ) : isManualItems ? (
               <button onClick={() => { setIsManualItems(false); setManualMode('choice'); setStep('manual-bill'); }} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Back</button>
             ) : (
               <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
@@ -1185,13 +1422,7 @@ export default function GroupPayPrototype() {
         {/* Item Assignment (receipt scan only) */}
         {step === 'item-assign' && (() => {
           const allPeople = [currentUser, ...otherParticipants];
-          const expandedOcrItems = ocrItems.flatMap((item) => {
-            const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
-            return Array.from({ length: qty }, (_, unitIdx) => ({
-              name: qty > 1 ? `${item.name} (${unitIdx + 1}/${qty})` : item.name,
-              price: item.price,
-            }));
-          });
+          const expandedOcrItems = expandReceiptItems(draftReceipt);
           const assignedCount = expandedOcrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
           const allAssigned = expandedOcrItems.length > 0 && assignedCount === expandedOcrItems.length;
 
@@ -1207,22 +1438,15 @@ export default function GroupPayPrototype() {
             });
           });
 
-          // Apply the ordered charge model: (food − discount) × svc × gst + flat.
-          // Rounding rule: round every NON-payee's share UP to the cent so the
-          // payee (who fronted the whole bill) always recovers at least the full
-          // amount — never a cent short, occasionally a few cents over. The payee's
-          // own displayed share is the remainder (bill − sum of others), which is
-          // ≤ their true share by exactly the rounding surplus.
-          const ceil2 = (n: number) => Math.ceil((n - Number.EPSILON) * 100) / 100;
+          // Per-person amounts for THIS bill only (the draft), so the breakdown
+          // lets you verify the current bill's split. The combined cross-receipt
+          // total is shown later on the review screen, not here.
           const personFinalTotals: Record<string, number> = {};
-          let othersSum = 0;
-          otherParticipants.forEach(name => {
-            const amt = ceil2(personItemizedRaw(personFoodTotals[name]));
-            personFinalTotals[name] = amt;
-            othersSum += amt;
+          allPeople.forEach(name => {
+            personFinalTotals[name] = round2(personReceiptRaw(draftReceipt, personFoodTotals[name]));
           });
-          // Payee covers whatever the others' rounded shares don't.
-          personFinalTotals[currentUser] = round2(itemizedTotal - othersSum);
+          // "food + charges" line uses this bill's food (personFoodTotals).
+          const personCombinedFood = personFoodTotals;
 
           const toggleAssignment = (itemIdx: number, person: string) => {
             setItemAssignments(prev => {
@@ -1236,20 +1460,6 @@ export default function GroupPayPrototype() {
 
           const assignAllToItem = (itemIdx: number) => {
             setItemAssignments(prev => ({ ...prev, [itemIdx]: [...allPeople] }));
-          };
-
-          const handleContinue = () => {
-            const amounts: Record<string, string> = {};
-            // Payee's share
-            amounts[currentUser] = personFinalTotals[currentUser].toFixed(2);
-            // Other participants
-            otherParticipants.forEach(name => {
-              amounts[name] = personFinalTotals[name].toFixed(2);
-            });
-            setCustomAmounts(amounts);
-            setEvenSplit(false);
-            setBillAmount(Object.values(personFinalTotals).reduce((s, v) => s + v, 0).toFixed(2));
-            setStep('review-split');
           };
 
           return (
@@ -1314,12 +1524,12 @@ export default function GroupPayPrototype() {
               })}
             </div>
 
-            {/* Per-person breakdown */}
+            {/* Per-person breakdown — THIS bill only */}
             <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
-              <div className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-3">Per Person Breakdown</div>
+              <div className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-3">{committedReceipts.length > 0 ? 'This Bill — Per Person' : 'Per Person Breakdown'}</div>
               <div className="space-y-2">
                 {allPeople.map(person => {
-                  const food = personFoodTotals[person];
+                  const food = personCombinedFood[person];
                   const final_ = personFinalTotals[person];
                   const charges = final_ - food;
                   return (
@@ -1341,14 +1551,51 @@ export default function GroupPayPrototype() {
               </div>
             </div>
 
+            {editingReceiptIndex >= 0 ? (
+              <div className="mb-3 text-center text-blue-300/70 text-xs">Editing bill #{editingReceiptIndex + 1}</div>
+            ) : committedReceipts.length > 0 && (
+              <div className="mb-3 text-center text-white/40 text-xs">{committedReceipts.length} {committedReceipts.length === 1 ? 'bill' : 'bills'} added · adding bill #{committedReceipts.length + 1}</div>
+            )}
+            {/* "Add another bill" only makes sense when adding, not editing */}
+            {editingReceiptIndex < 0 && (
+              <button
+                onClick={() => {
+                  // Commit this receipt and recompute amounts so the review screen
+                  // (reachable via "Back to bills so far") is always consistent,
+                  // then start a fresh draft for the next bill.
+                  const receipts = commitDraftReceipt();
+                  const { amounts, total } = computeFinalAmounts(receipts);
+                  const strAmounts: Record<string, string> = {};
+                  Object.entries(amounts).forEach(([k, v]) => { strAmounts[k] = v.toFixed(2); });
+                  setCustomAmounts(strAmounts);
+                  setEvenSplit(false);
+                  setSplitMethod('amount');
+                  setBillAmount(total.toFixed(2));
+                  resetDraftForNewReceipt();
+                  setStep('ocr-choice');
+                }}
+                disabled={!allAssigned}
+                className="w-full mb-3 btn-secondary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span>+ Add another bill</span><ArrowRight size={20} />
+              </button>
+            )}
             <button
-              onClick={handleContinue}
+              onClick={finishReceipts}
               disabled={!allAssigned}
               className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <span>Confirm Split</span><ArrowRight size={20} />
+              <span>{editingReceiptIndex >= 0 ? 'Save changes' : (committedReceipts.length > 0 ? 'Done — Review Split' : 'Confirm Split')}</span><ArrowRight size={20} />
             </button>
-            <button onClick={() => setStep('participants')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+            <button
+              onClick={() => {
+                // When editing an existing receipt, Back cancels the edit (discard
+                // draft changes) and returns to review without leaking edit state.
+                if (editingReceiptIndex >= 0) { resetDraftForNewReceipt(); setStep('review-split'); }
+                else setStep('participants');
+              }}
+              className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"
+            ><ArrowLeft size={16} />{editingReceiptIndex >= 0 ? 'Cancel edit' : 'Back'}</button>
           </div>
           );
         })()}
@@ -1701,6 +1948,43 @@ export default function GroupPayPrototype() {
               </div>
             </div>
 
+            {/* Per-bill summary with edit/remove (shown for any itemized receipts) */}
+            {committedReceipts.length > 0 && (
+              <div className="bg-white/5 rounded-xl p-3 my-4 border border-white/10 space-y-2">
+                <div className="text-white/40 text-xs font-semibold uppercase tracking-wider">{committedReceipts.length === 1 ? '1 bill' : `${committedReceipts.length} bills combined`}</div>
+                {committedReceipts.map((r, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2">
+                    <span className="text-white/70 text-sm">{r.label || `Bill ${i + 1}`}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-green-400 mono text-sm">${receiptTotals(r).total.toFixed(2)}</span>
+                      <button
+                        onClick={() => { loadReceiptIntoDraft(i); setStep('ocr-result'); }}
+                        className="text-blue-300 hover:text-blue-200 text-xs px-2 py-1 rounded bg-blue-500/10"
+                      >Edit</button>
+                      <button
+                        onClick={() => {
+                          const next = committedReceipts.filter((_, j) => j !== i);
+                          setCommittedReceipts(next);
+                          if (next.length === 0) { reset(); return; }
+                          // Recompute amounts after removal
+                          const { amounts, total } = computeFinalAmounts(next);
+                          const strAmounts: Record<string, string> = {};
+                          Object.entries(amounts).forEach(([k, v]) => { strAmounts[k] = v.toFixed(2); });
+                          setCustomAmounts(strAmounts);
+                          setBillAmount(total.toFixed(2));
+                        }}
+                        className="text-red-400/70 hover:text-red-400 text-xs px-2 py-1 rounded bg-red-500/10"
+                      >Remove</button>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => { resetDraftForNewReceipt(); setStep('ocr-choice'); }}
+                  className="w-full mt-1 text-blue-300 hover:text-blue-200 text-xs py-2 rounded-lg border border-blue-400/20 bg-blue-500/5"
+                >+ Add another bill</button>
+              </div>
+            )}
+
             <div className="flex gap-1 bg-white/5 rounded-xl p-1 my-4 border border-white/10">
               <button onClick={() => setReviewTab('overview')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${reviewTab === 'overview' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
                 Overview
@@ -1788,7 +2072,21 @@ export default function GroupPayPrototype() {
                 <span>Send to Group</span>
                 <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
               </button>
-              <button onClick={() => setStep(ocrItems.length > 0 ? 'item-assign' : evenSplit ? 'split-type' : 'custom-split')} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
+              <button onClick={() => {
+                // Itemized multi-receipt: edit the first bill (rest are listed above).
+                // Single committed receipt: load it back into the draft to edit.
+                // Non-itemized: go to the relevant split editor.
+                if (committedReceipts.length > 0) {
+                  // With 2+ bills, per-bill Edit buttons in the summary list cover
+                  // the rest; this button edits the first bill.
+                  loadReceiptIntoDraft(0);
+                  setStep('ocr-result');
+                } else if (ocrItems.length > 0) {
+                  setStep('item-assign');
+                } else {
+                  setStep(evenSplit ? 'split-type' : 'custom-split');
+                }
+              }} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
             </div>
           </div>
         )}
@@ -1941,7 +2239,7 @@ export default function GroupPayPrototype() {
               <button onClick={() => setOverviewTab('history')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'history' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
                 History
               </button>
-              {splitItems && splitItems.length > 0 && (
+              {((splitItems && splitItems.length > 0) || (splitReceipts && splitReceipts.length > 0)) && (
                 <button onClick={() => setOverviewTab('items')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'items' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
                   Items
                 </button>
@@ -2072,36 +2370,67 @@ export default function GroupPayPrototype() {
               </div>
             )}
 
-            {overviewTab === 'items' && splitItems && (
-              <div className="mb-4 space-y-3">
-                <p className="text-blue-200 text-xs">Itemized breakdown — cross-check your assigned items below.</p>
-                {splitItems.map((item, i) => (
-                  <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="text-white text-sm font-medium">{item.name}</span>
-                      <span className="text-green-400 mono text-sm font-semibold">${item.price.toFixed(2)}</span>
+            {overviewTab === 'items' && (splitReceipts || splitItems) && (() => {
+              // Prefer per-receipt sections; fall back to a single flat list.
+              const sections = splitReceipts && splitReceipts.length > 0
+                ? splitReceipts
+                : [{ label: '', items: splitItems || [], subtotal: (splitItems || []).reduce((s, it) => s + it.price, 0),
+                     discount: 0, serviceRate: null, service: 0, gstRate: null, gst: 0, flat: 0,
+                     total: (splitItems || []).reduce((s, it) => s + it.price, 0) }];
+              const multi = sections.length > 1;
+              return (
+                <div className="mb-4 space-y-4">
+                  <p className="text-blue-200 text-xs">Itemized breakdown — cross-check your assigned items below.</p>
+                  {sections.map((rec, ri) => (
+                    <div key={ri} className="space-y-2">
+                      {(multi || rec.label) && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-white/70 text-sm font-bold">{rec.label || 'Items'}</span>
+                          <span className="text-green-400 mono text-sm font-bold">${rec.total.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {rec.items.map((item, i) => (
+                        <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
+                          <div className="flex justify-between items-start mb-1">
+                            <span className="text-white text-sm font-medium">{item.name}</span>
+                            <span className="text-green-400 mono text-sm font-semibold">${item.price.toFixed(2)}</span>
+                          </div>
+                          {item.assignees.length > 0 ? (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {item.assignees.map((a, j) => (
+                                <span key={j} className="text-[10px] bg-blue-500/15 text-blue-200 rounded px-2 py-0.5 mono">
+                                  @{a}{item.assignees.length > 1 ? ` · $${(item.price / item.assignees.length).toFixed(2)}` : ''}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-amber-400">Unassigned</span>
+                          )}
+                        </div>
+                      ))}
+                      {/* Per-receipt charge breakdown */}
+                      {(rec.discount > 0 || rec.service > 0 || rec.gst > 0 || rec.flat > 0) && (
+                        <div className="bg-white/5 rounded-lg px-3 py-2 space-y-0.5">
+                          <div className="flex justify-between text-[11px]"><span className="text-white/40">Subtotal</span><span className="text-white/60 mono">${rec.subtotal.toFixed(2)}</span></div>
+                          {rec.discount > 0 && <div className="flex justify-between text-[11px]"><span className="text-rose-300/60">Discount</span><span className="text-rose-300 mono">−${rec.discount.toFixed(2)}</span></div>}
+                          {rec.service > 0 && <div className="flex justify-between text-[11px]"><span className="text-white/40">Service{rec.serviceRate ? ` ${rec.serviceRate}%` : ''}</span><span className="text-amber-300 mono">+${rec.service.toFixed(2)}</span></div>}
+                          {rec.gst > 0 && <div className="flex justify-between text-[11px]"><span className="text-white/40">GST{rec.gstRate ? ` ${rec.gstRate}%` : ''}</span><span className="text-amber-300 mono">+${rec.gst.toFixed(2)}</span></div>}
+                          {rec.flat > 0 && <div className="flex justify-between text-[11px]"><span className="text-white/40">Other</span><span className="text-amber-300 mono">+${rec.flat.toFixed(2)}</span></div>}
+                        </div>
+                      )}
                     </div>
-                    {item.assignees.length > 0 ? (
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {item.assignees.map((a, j) => (
-                          <span key={j} className="text-[10px] bg-blue-500/15 text-blue-200 rounded px-2 py-0.5 mono">
-                            @{a}{item.assignees.length > 1 ? ` · $${(item.price / item.assignees.length).toFixed(2)}` : ''}
-                          </span>
-                        ))}
+                  ))}
+                  {multi && (
+                    <div className="bg-white/5 rounded-lg p-3 border-t-2 border-white/15">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-white font-bold">Grand Total</span>
+                        <span className="text-green-400 mono font-bold">${sections.reduce((s, r) => s + r.total, 0).toFixed(2)}</span>
                       </div>
-                    ) : (
-                      <span className="text-[10px] text-amber-400">Unassigned</span>
-                    )}
-                  </div>
-                ))}
-                <div className="bg-white/5 rounded-lg p-3 mt-2">
-                  <div className="flex justify-between text-xs">
-                    <span className="text-white/50">Items Subtotal</span>
-                    <span className="text-white mono font-bold">${splitItems.reduce((s, it) => s + it.price, 0).toFixed(2)}</span>
-                  </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {allPaid() && (
               <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-2xl p-6 mb-4 border border-green-400/30 animate-in">

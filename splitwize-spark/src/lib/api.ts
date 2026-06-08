@@ -14,6 +14,20 @@ export interface SplitItem {
   assignees: string[];
 }
 
+// One receipt's display breakdown for the View Split → Items tab.
+export interface SplitReceipt {
+  label: string;            // "Bill 1", "Bill 2", …
+  items: SplitItem[];
+  subtotal: number;
+  discount: number;
+  serviceRate: number | null;
+  service: number;
+  gstRate: number | null;
+  gst: number;
+  flat: number;
+  total: number;
+}
+
 export interface Session {
   id: string;
   event_name: string;
@@ -22,7 +36,8 @@ export interface Session {
   even_split: boolean;
   created_at: string;
   participants: Participant[];
-  items?: SplitItem[] | null;
+  items?: SplitItem[] | null;          // legacy single-receipt flat list
+  receipts?: SplitReceipt[] | null;    // multi-receipt breakdown
 }
 
 export async function createSession(data: {
@@ -37,6 +52,7 @@ export async function createSession(data: {
   chat_id?: string;
   thread_id?: string;
   items?: { name: string; price: number; qty: number; assignees: string[] }[];
+  receipts?: SplitReceipt[];
 }): Promise<Session> {
   const res = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
