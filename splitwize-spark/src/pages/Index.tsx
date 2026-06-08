@@ -2076,21 +2076,17 @@ export default function GroupPayPrototype() {
                 <span>Send to Group</span>
                 <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
               </button>
-              <button onClick={() => {
-                // Itemized multi-receipt: edit the first bill (rest are listed above).
-                // Single committed receipt: load it back into the draft to edit.
-                // Non-itemized: go to the relevant split editor.
-                if (committedReceipts.length > 0) {
-                  // With 2+ bills, per-bill Edit buttons in the summary list cover
-                  // the rest; this button edits the first bill.
-                  loadReceiptIntoDraft(0);
-                  setStep('ocr-result');
-                } else if (ocrItems.length > 0) {
-                  setStep('item-assign');
-                } else {
-                  setStep(evenSplit ? 'split-type' : 'custom-split');
-                }
-              }} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
+              {/* Itemized splits are edited via the per-bill Edit buttons above,
+                  so only show this for non-itemized (even/custom) splits. */}
+              {committedReceipts.length === 0 && (
+                <button onClick={() => {
+                  if (ocrItems.length > 0) {
+                    setStep('item-assign');
+                  } else {
+                    setStep(evenSplit ? 'split-type' : 'custom-split');
+                  }
+                }} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
+              )}
             </div>
           </div>
         )}
