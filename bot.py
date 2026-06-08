@@ -464,39 +464,6 @@ def api_ocr():
     })
 
 
-@app.route("/api/sessions/<session_id>/participants/<name>/self-confirm", methods=["POST"])
-def api_self_confirm(session_id, name):
-    """Participant confirms their own payment. Only allowed if they've read the whisper."""
-    session = db.get_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
-    participant = next((p for p in session["participants"] if p["name"] == name), None)
-    if not participant:
-        return jsonify({"error": "Participant not found"}), 404
-    if not participant.get("whisper_read"):
-        return jsonify({"error": "You must view your QR code first"}), 403
-    db.update_participant_status(session_id, name, "self-confirmed")
-    # Notify group chat
-    chat_id = session.get("chat_id")
-    tid_kwargs = {}
-    if session.get("thread_id"):
-        tid_kwargs["message_thread_id"] = int(session["thread_id"])
-    if chat_id:
-        try:
-            cid = int(chat_id)
-            p_mention = _mention(name, participant.get("telegram_id"), cid)
-            bot.send_message(
-                cid,
-                f"💸 {p_mention} says they've paid <b>${participant['amount']}</b>.\n"
-                f"Awaiting confirmation from {_mention(session['payee'], chat_id=cid)}.",
-                parse_mode="HTML",
-                **tid_kwargs,
-            )
-        except Exception as e:
-            print(f"[BOT ERROR] Self-confirm notify failed: {e}")
-    return jsonify({"ok": True, "status": "self-confirmed"})
-
-
 @app.route("/api/sessions/<session_id>/qr/<name>", methods=["GET"])
 def api_qr(session_id, name):
     session = db.get_session(session_id)
