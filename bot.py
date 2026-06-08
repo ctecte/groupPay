@@ -856,7 +856,10 @@ def cmd_split(msg):
     try:
         bot.send_message(
             msg.chat.id,
-            "📢 *Let's split a bill!*\n\nTap below to open GroupPay:",
+            "📢 *Let's split a bill!*\n\nTap below to open GroupPay:\n\n"
+            "_Tip: if a friend's @handle doesn't show up, ask them to say hi or "
+            "text anything in this chat — I can only see people who've messaged "
+            "after I joined._",
             parse_mode="Markdown",
             reply_markup=_make_keyboard(msg),
             **_thread_kwargs(msg),
@@ -893,6 +896,24 @@ def handle_new_members(msg):
             name = user.first_name or user.username or str(user.id)
             group_members[chat_id][user.id] = name
         _save_members()
+
+        # Greet the group when GroupPay itself is the one being added.
+        bot_id = int(BOT_TOKEN.split(":")[0])
+        if any(u.id == bot_id for u in msg.new_chat_members):
+            try:
+                bot.send_message(
+                    chat_id,
+                    "👋 *Thanks for adding GroupPay!*\n\n"
+                    "Heads up: I can only see the @telehandles of people who are "
+                    "added or send a message in this chat *after* I joined — so say hi!\n\n"
+                    "Say hello to easy bill splits with PayNow QRs at your fingertips. "
+                    "Tap below or use /split to get started.",
+                    parse_mode="Markdown",
+                    reply_markup=_make_keyboard(msg),
+                    **_thread_kwargs(msg),
+                )
+            except Exception as e:
+                print(f"[WELCOME ERROR] chat_id={chat_id}: {e}", flush=True)
 
 
 @bot.message_handler(content_types=["left_chat_member"])
