@@ -27,7 +27,7 @@ CF_TUNNEL_ID="45ae2fc4-abff-48c9-a21d-c79fda73e46a"
 CF_CREDS="$HOME/.cloudflared/${CF_TUNNEL_ID}.json"
 
 # Check for existing tunnel
-EXI TING_URL=""
+EXISTING_URL=""
 if [ "$TUNNEL" = "auto" ]; then
     # Default to named tunnel
     TUNNEL="named"

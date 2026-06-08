@@ -109,6 +109,37 @@ def api_create_session():
     data = request.json
     if not data:
         return jsonify({"error": "Missing JSON body"}), 400
+
+    # Diagnostic logging for duplicate-session investigation.
+    # Captures who/what/where so two POSTs can be compared: same client+payload
+    # within seconds (retry/replay) vs. genuinely separate opens minutes apart.
+    import hashlib
+    _fp_src = json.dumps({
+        "chat_id": data.get("chat_id"),
+        "thread_id": data.get("thread_id"),
+        "payee": data.get("payee"),
+        "bill_amount": data.get("bill_amount"),
+        "participants": sorted(
+            (p.get("name"), p.get("amount")) for p in data.get("participants", [])
+        ),
+    }, sort_keys=True, default=str)
+    _fp = hashlib.sha1(_fp_src.encode()).hexdigest()[:10]
+    _ip = (request.headers.get("CF-Connecting-IP")
+           or request.headers.get("X-Forwarded-For")
+           or request.remote_addr)
+    _ua = request.headers.get("User-Agent", "")
+    print(
+        f"[SESSION REQ] fp={_fp} ip={_ip} ua={_ua!r} "
+        f"chat_id={data.get('chat_id')} thread_id={data.get('thread_id')} "
+        f"event={data.get('event_name')!r} bill={data.get('bill_amount')}",
+        flush=True,
+    )
+
+    # Persist itemized receipt + assignments (only present for OCR-scanned bills)
+    # as a JSON blob for display-only cross-checking on the View Split page.
+    items = data.get("items")
+    items_json = json.dumps(items) if items else None
+
     session = db.create_session(
         event_name=data["event_name"],
         bill_amount=data["bill_amount"],
@@ -120,6 +151,7 @@ def api_create_session():
         payee_phone=data.get("payee_phone"),
         payee_amount=data.get("payee_amount"),
         payee_telegram_id=data.get("payee_telegram_id"),
+        items_json=items_json,
     )
 
     # Announce in group chat if chat_id provided
@@ -128,7 +160,7 @@ def api_create_session():
     thread_id = data.get("thread_id")
     if thread_id:
         tid_kwargs["message_thread_id"] = int(thread_id)
-    print(f"[SESSION] Created {session['id']}, chat_id={chat_id}, thread_id={thread_id}, participants={[p['name'] for p in data['participants']]}")
+    print(f"[SESSION] Created {session['id']} fp={_fp}, chat_id={chat_id}, thread_id={thread_id}, participants={[p['name'] for p in data['participants']]}", flush=True)
     if chat_id:
         try:
             cid = int(chat_id)
@@ -210,6 +242,9 @@ def api_get_session(session_id):
             p["screenshot_url"] = f"/api/sessions/{session_id}/participants/{quote(p['name'])}/screenshot"
         else:
             p["screenshot_url"] = None
+    # Parse the itemized breakdown JSON blob back into an object (None if not OCR)
+    items_raw = session.pop("items_json", None)
+    session["items"] = json.loads(items_raw) if items_raw else None
     return jsonify(session)
 
 
@@ -368,6 +403,9 @@ def api_ocr():
     items = result.get("items", [])
     add_on_charges = result.get("add_on_charges", [])
     informational_charges = result.get("informational_charges", [])
+    discounts = result.get("discounts", [])
+    service_charge_rate = result.get("service_charge_rate")
+    gst_rate = result.get("gst_rate")
     receipt_subtotal = result.get("receipt_subtotal")
     receipt_grand_total = result.get("receipt_grand_total")
     charges = result.get("charges", add_on_charges + informational_charges)
@@ -381,13 +419,17 @@ def api_ocr():
 
     computed_subtotal = round(sum(item["price"] * item["qty"] for item in items), 2)
     computed_add_on_total = round(sum(c["price"] for c in add_on_charges), 2)
+    computed_discount_total = round(sum(d["price"] for d in discounts), 2)
     subtotal = round(receipt_subtotal, 2) if isinstance(receipt_subtotal, (int, float)) else computed_subtotal
-    computed_total = round(computed_subtotal + computed_add_on_total, 2)
+    computed_total = round(computed_subtotal - computed_discount_total + computed_add_on_total, 2)
     total = round(receipt_grand_total, 2) if isinstance(receipt_grand_total, (int, float)) else computed_total
     return jsonify({
         "items": items,
         "add_on_charges": add_on_charges,
         "informational_charges": informational_charges,
+        "discounts": discounts,
+        "service_charge_rate": service_charge_rate,
+        "gst_rate": gst_rate,
         "charges": charges,
         "charges_included": charges_included,
         "subtotal": subtotal,
@@ -481,7 +523,7 @@ def api_pay_page(session_id, name):
         return "Participant not found", 404
 
     payee_phone = session.get("payee_phone", "")
-    phone_display = f"+65 {payee_phone[:4]} {payee_phone[4:]}" if payee_phone else "N/A"
+    phone_display = f"+65 XXXX {payee_phone[-4:]}" if payee_phone else "N/A"
     qr_img_url = f"/api/sessions/{session_id}/qr/{quote(name)}"
     from datetime import datetime
     date_str = datetime.utcnow().strftime("%Y%m%d")
@@ -492,6 +534,11 @@ def api_pay_page(session_id, name):
 
     payment_ref = participant.get("payment_ref", "")
     is_paid = participant["status"] == "paid"
+    # Human-readable generation date from the session's created_at (fallback to today)
+    try:
+        gen_date = datetime.fromisoformat(session["created_at"]).strftime("%d %b %Y")
+    except Exception:
+        gen_date = datetime.utcnow().strftime("%d %b %Y")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -531,7 +578,7 @@ def api_pay_page(session_id, name):
 </head>
 <body>
 <div class="card">
-  <div class="title">PayNow Payment</div>
+  <div class="title">{session['event_name']}</div>
   <div class="amount">${participant['amount']}</div>
   {'<div class="status-msg status-ok">✅ Payment screenshot submitted</div>' if is_paid else f"""
   <div class="qr-wrap">
@@ -540,11 +587,8 @@ def api_pay_page(session_id, name):
   <div class="details">
     <div class="row"><span class="label">Pay to</span><span class="value">{session['payee']}</span></div>
     <div class="row"><span class="label">PayNow</span><span class="value">{phone_display}</span></div>
-    <div class="row"><span class="label">Amount</span><span class="value">${participant['amount']}</span></div>
-    <div class="row"><span class="label">Event</span><span class="value">{session['event_name']}</span></div>
-    <div class="row"><span class="label">Ref</span><span class="value">{payment_ref}</span></div>
+    <div class="row"><span class="label">Generated</span><span class="value">{gen_date}</span></div>
   </div>
-  <div class="ref">Include ref <code>{payment_ref}</code> in your PayNow comment</div>
   <a href="{qr_img_url}" download="{filename}" class="btn btn-primary">📥 Download QR Image</a>
   <div id="upload-area">
     <label class="btn btn-upload" id="upload-btn">
@@ -554,7 +598,6 @@ def api_pay_page(session_id, name):
   </div>
   <div id="status"></div>
   """}
-  <div class="event">GroupPay — {session['event_name']}</div>
 </div>
 <script>
 async function uploadScreenshot(input) {{

@@ -20,11 +20,23 @@ export default function GroupPayPrototype() {
   const [ocrInformationalCharges, setOcrInformationalCharges] = useState<{ name: string; price: number }[]>([]);
   const [ocrChargesIncluded, setOcrChargesIncluded] = useState(false);
   const [ocrSubtotal, setOcrSubtotal] = useState(0);
+  // Itemized-path charge model (rate-based, ordered: subtotal − discount, then svc, then GST)
+  const [ocrServiceOn, setOcrServiceOn] = useState(false);
+  const [ocrServiceRate, setOcrServiceRate] = useState(10);
+  const [ocrGstOn, setOcrGstOn] = useState(false);
+  const [ocrGstRate, setOcrGstRate] = useState(9);
+  const [ocrDiscount, setOcrDiscount] = useState(0);
+  const [ocrDiscountIsPercent, setOcrDiscountIsPercent] = useState(false);
+  // Manual entry: 'total' (just a number) or 'items' (reuse the itemized editor)
+  const [manualMode, setManualMode] = useState<'choice' | 'total'>('choice');
+  // True when the itemized editor was reached via manual entry (no receipt scan)
+  const [isManualItems, setIsManualItems] = useState(false);
   const [ocrReceiptGrandTotal, setOcrReceiptGrandTotal] = useState<number | null>(null);
   const [itemAssignments, setItemAssignments] = useState<Record<number, string[]>>({});
   const [ocrEditing, setOcrEditing] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  const sessionCreatedRef = useRef(false);
   const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
   const [screenshotUploaded, setScreenshotUploaded] = useState(false);
   const [screenshotUrls, setScreenshotUrls] = useState<Record<string, string | null>>({});
@@ -45,7 +57,7 @@ export default function GroupPayPrototype() {
 
   // Tabbed views
   const [reviewTab, setReviewTab] = useState<'overview' | 'details'>('overview');
-  const [overviewTab, setOverviewTab] = useState<'status' | 'history'>('status');
+  const [overviewTab, setOverviewTab] = useState<'status' | 'history' | 'items'>('status');
 
   // Payment history
   const [paymentHistory, setPaymentHistory] = useState<{ name: string; amount: string; time: string }[]>([]);
@@ -74,6 +86,9 @@ export default function GroupPayPrototype() {
 
   // Session ID for API
   const [sessionId, setSessionId] = useState<string | null>(null);
+
+  // Itemized breakdown loaded from a restored session (OCR bills only)
+  const [splitItems, setSplitItems] = useState<{ name: string; price: number; qty: number; assignees: string[] }[] | null>(null);
 
   // File input ref for screenshot upload
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -126,6 +141,7 @@ export default function GroupPayPrototype() {
         setCustomAmounts(amounts);
         setScreenshotUrls(screenshots);
         if (session.remind_after_hours) setAutoRemindHours(session.remind_after_hours);
+        if (session.items) setSplitItems(session.items);
         setSplitConfirmed(true);
         setStep('overview');
       }).catch(() => {
@@ -222,6 +238,34 @@ export default function GroupPayPrototype() {
     return customAmounts[person] || '0.00';
   };
 
+  // ---- Itemized charge model (shared by ocr-result + item-assign) ----
+  // Ordered: (subtotal − discount) × (1 + svc%) × (1 + gst%) + flat add-on charges.
+  // Charge components are rounded to cents BEFORE summing — this matches how
+  // receipts compute (svc shown as $4.82, not $4.815), so our total matches the
+  // printed grand total exactly instead of drifting a cent.
+  const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+  const itemizedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
+  const itemizedDiscount = round2(ocrDiscountIsPercent
+    ? itemizedSubtotal * (ocrDiscount / 100)
+    : ocrDiscount);
+  const itemizedDiscountedBase = Math.max(0, itemizedSubtotal - itemizedDiscount);
+  const itemizedSvc = ocrServiceOn ? round2(itemizedDiscountedBase * (ocrServiceRate / 100)) : 0;
+  const itemizedGst = ocrGstOn ? round2((itemizedDiscountedBase + itemizedSvc) * (ocrGstRate / 100)) : 0;
+  const itemizedFlatCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
+  const itemizedTotal = round2(itemizedDiscountedBase + itemizedSvc + itemizedGst + itemizedFlatCharges);
+
+  // Per-person itemized total (raw, unrounded) given their food share.
+  const personItemizedRaw = (personFood: number) => {
+    if (itemizedSubtotal <= 0) return 0;
+    const ratio = personFood / itemizedSubtotal;
+    const personDiscounted = personFood - ratio * itemizedDiscount;
+    const svc = ocrServiceOn ? personDiscounted * (ocrServiceRate / 100) : 0;
+    const gst = ocrGstOn ? (personDiscounted + svc) * (ocrGstRate / 100) : 0;
+    const flat = ratio * itemizedFlatCharges;
+    return personDiscounted + svc + gst + flat;
+  };
+  const personItemizedTotal = (personFood: number) => round2(personItemizedRaw(personFood));
+
   // Settlement progress
   const paidCount = participants.filter(p => p.trim() && paymentStatuses[p] === 'paid').length;
   const totalParticipants = otherParticipants.length;
@@ -241,11 +285,34 @@ export default function GroupPayPrototype() {
         return;
       }
       setOcrItems(result.items);
-      setOcrCharges(result.add_on_charges ?? result.charges ?? []);
       setOcrInformationalCharges(result.informational_charges ?? []);
       setOcrChargesIncluded((result.add_on_charges?.length ?? 0) === 0 && (result.informational_charges?.length ?? 0) > 0);
       setOcrSubtotal(result.subtotal ?? 0);
       setOcrReceiptGrandTotal(result.receipt_grand_total ?? null);
+
+      // Detect whether svc/GST charges are present, then apply the standard SG
+      // rates (svc 10%, GST 9%). We don't derive the rate from the dollar amount —
+      // OCR frequently misreads an item price, which would skew a derived rate.
+      // The user can still adjust the rate in the editor if a receipt differs.
+      const addOns = result.add_on_charges ?? [];
+      const svcCharge = addOns.find(c => /svc|service/i.test(c.name));
+      const gstCharge = addOns.find(c => /gst|tax/i.test(c.name));
+      const otherCharges = addOns.filter(c => c !== svcCharge && c !== gstCharge);
+
+      if (svcCharge) { setOcrServiceOn(true); setOcrServiceRate(10); }
+      else { setOcrServiceOn(false); }
+
+      if (gstCharge) { setOcrGstOn(true); setOcrGstRate(9); }
+      else { setOcrGstOn(false); }
+
+      // Any remaining flat add-on charges (e.g. corkage) stay as flat lines.
+      setOcrCharges(otherCharges.map(c => ({ name: c.name, price: c.price })));
+
+      // Discounts: sum into a single flat-dollar discount.
+      const discTotal = (result.discounts ?? []).reduce((s, d) => s + d.price, 0);
+      setOcrDiscount(discTotal);
+      setOcrDiscountIsPercent(false);
+
       setBillAmount((result.total ?? 0).toFixed(2));
       setItemAssignments({});
       setOcrEditing(false);
@@ -372,6 +439,16 @@ export default function GroupPayPrototype() {
     setOverviewTab('status');
     setPaymentHistory([]);
     setSessionId(null);
+    setSplitItems(null);
+    setOcrServiceOn(false);
+    setOcrGstOn(false);
+    setOcrServiceRate(10);
+    setOcrGstRate(9);
+    setOcrDiscount(0);
+    setOcrDiscountIsPercent(false);
+    setManualMode('choice');
+    setIsManualItems(false);
+    sessionCreatedRef.current = false;
   };
 
   const handleSendReminder = async (participant: string) => {
@@ -403,6 +480,11 @@ export default function GroupPayPrototype() {
     setAutoRemindHours(null);
     setStep('auto-remind-setup');
 
+    // Idempotency guard: don't create a second session if one already exists
+    // (e.g. user navigates back to review and taps Confirm again).
+    if (sessionCreatedRef.current || sessionId) return;
+    sessionCreatedRef.current = true;
+
     // Create session via API
     const validParticipants = participants.filter(p => p.trim());
     const participantData = validParticipants.map(p => {
@@ -419,6 +501,26 @@ export default function GroupPayPrototype() {
     const chatId = params.get('chat_id') || undefined;
     const threadId = params.get('thread_id') || undefined;
 
+    // Build itemized breakdown for cross-checking (only when OCR items exist).
+    // Mirror the expand-by-qty indexing used on the item-assign screen so the
+    // assignees line up with itemAssignments.
+    let itemsPayload: { name: string; price: number; qty: number; assignees: string[] }[] | undefined;
+    if (ocrItems.length > 0) {
+      const expanded = ocrItems.flatMap((item) => {
+        const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
+        return Array.from({ length: qty }, (_, unitIdx) => ({
+          name: qty > 1 ? `${item.name} (${unitIdx + 1}/${qty})` : item.name,
+          price: item.price,
+        }));
+      });
+      itemsPayload = expanded.map((item, idx) => ({
+        name: item.name,
+        price: item.price,
+        qty: 1,
+        assignees: itemAssignments[idx] || [],
+      }));
+    }
+
     try {
       const session = await createSession({
         event_name: eventName,
@@ -431,13 +533,17 @@ export default function GroupPayPrototype() {
         participants: participantData,
         chat_id: chatId,
         thread_id: threadId,
+        items: itemsPayload,
       });
       setSessionId(session.id);
+      if (itemsPayload) setSplitItems(itemsPayload);
       // Update URL so this session is bookmarkable/revisitable
       const url = new URL(window.location.href);
       url.searchParams.set('session', session.id);
       window.history.replaceState({}, '', url.toString());
     } catch {
+      // Creation failed — allow a retry on next Confirm tap
+      sessionCreatedRef.current = false;
       // API might not be available, continue with local state
     }
   };
@@ -602,16 +708,16 @@ export default function GroupPayPrototype() {
             }
             setOcrCharges(prev => [...prev, { name, price }]);
           };
-          const computedSubtotal = ocrItems.reduce((s, i) => s + i.price * i.qty, 0);
-          const computedCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
-          const computedTotal = computedSubtotal + computedCharges;
+          const computedSubtotal = itemizedSubtotal;
+          const computedCharges = itemizedFlatCharges;
+          const computedTotal = itemizedTotal;
           const totalMismatch = ocrReceiptGrandTotal !== null && Math.abs(ocrReceiptGrandTotal - computedTotal) > 0.01;
           const hasMissingPrices = ocrItems.some(i => i.price === 0);
 
           return (
           <div className="glass rounded-3xl p-8 animate-in">
             <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">{ocrEditing ? 'Edit Receipt' : 'Receipt Scanned'}</h2></div>
+              <div className="flex items-center gap-2"><CheckCircle className="text-green-400" size={24} /><h2 className="text-white text-xl font-bold">{isManualItems ? (ocrEditing ? 'Enter Items' : 'Bill Items') : (ocrEditing ? 'Edit Receipt' : 'Receipt Scanned')}</h2></div>
               <button onClick={() => setOcrEditing(!ocrEditing)} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all border ${ocrEditing ? 'bg-blue-500/20 border-blue-400/50 text-blue-300' : 'bg-white/5 border-white/15 text-white/50 hover:text-white'}`}>
                 <Edit2 size={14} className="inline mr-1" />{ocrEditing ? 'Done' : 'Edit'}
               </button>
@@ -631,43 +737,20 @@ export default function GroupPayPrototype() {
                         )}
                       </div>
                     ))}
-                    {ocrCharges.length > 0 && (
-                      <div className="pt-2">
-                        {ocrCharges.map((charge, index) => (
-                          <div key={`charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
-                            <div className="text-white/50 text-sm">{charge.name}</div>
-                            <div className={`mono font-semibold ${ocrChargesIncluded ? 'text-white/30 line-through' : 'text-amber-400'}`}>
-                              {ocrChargesIncluded ? '' : '+'} ${charge.price.toFixed(2)}
-                            </div>
-                          </div>
-                        ))}
-                        <div className={`text-xs mt-1 px-2 py-1 rounded ${ocrChargesIncluded ? 'text-white/40 bg-white/5' : 'text-amber-300/80 bg-amber-500/10'}`}>
-                          {ocrChargesIncluded ? 'Already in menu prices — not added' : `+$${ocrCharges.reduce((s, c) => s + c.price, 0).toFixed(2)} added to total`}
-                        </div>
-                      </div>
-                    )}
-                    {ocrInformationalCharges.length > 0 && (
-                      <div className="pt-2">
-                        {ocrInformationalCharges.map((charge, index) => (
-                          <div key={`info-charge-${index}`} className={`flex justify-between items-start py-2 ${index < ocrInformationalCharges.length - 1 ? 'border-b border-white/10' : ''}`}>
-                            <div className="text-white/50 text-sm">{charge.name}</div>
-                            <div className="mono font-semibold text-white/30 line-through">
-                              ${charge.price.toFixed(2)}
-                            </div>
-                          </div>
-                        ))}
-                        <div className="text-xs mt-1 px-2 py-1 rounded text-white/40 bg-white/5">
-                          Informational only — already included in the payable total
-                        </div>
-                      </div>
-                    )}
                   </div>
-                  <div className="mt-4 pt-4 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
+                  <div className="mt-3 pt-3 border-t border-white/10 space-y-1">
+                    <div className="flex justify-between text-sm"><span className="text-white/50">Subtotal</span><span className="text-white/80 mono">${itemizedSubtotal.toFixed(2)}</span></div>
+                    {itemizedDiscount > 0 && <div className="flex justify-between text-sm"><span className="text-rose-300/70">Discount</span><span className="text-rose-300 mono">−${itemizedDiscount.toFixed(2)}</span></div>}
+                    {ocrServiceOn && <div className="flex justify-between text-sm"><span className="text-white/50">Service {ocrServiceRate}%</span><span className="text-amber-300 mono">+${itemizedSvc.toFixed(2)}</span></div>}
+                    {ocrGstOn && <div className="flex justify-between text-sm"><span className="text-white/50">GST {ocrGstRate}%</span><span className="text-amber-300 mono">+${itemizedGst.toFixed(2)}</span></div>}
+                    {itemizedFlatCharges > 0 && <div className="flex justify-between text-sm"><span className="text-white/50">Other charges</span><span className="text-amber-300 mono">+${itemizedFlatCharges.toFixed(2)}</span></div>}
+                  </div>
+                  <div className="mt-3 pt-3 border-t-2 border-white/20 flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
                 </div>
                 {hasMissingPrices ? (
                   <div className="bg-amber-500/10 rounded-xl p-4 mb-6 border border-amber-400/30"><p className="text-amber-200 text-sm"><strong className="text-white">⚠ Some prices couldn't be read</strong><br />Tap <strong>Edit</strong> to fill in the missing prices before continuing.</p></div>
                 ) : (
-                  <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} food items{ocrCharges.length > 0 ? ` + ${ocrCharges.length} add-on charges` : ''}{ocrInformationalCharges.length > 0 ? ` + ${ocrInformationalCharges.length} informational charges` : ''} = ${computedTotal.toFixed(2)}{ocrReceiptGrandTotal !== null ? ` (receipt total: $${ocrReceiptGrandTotal.toFixed(2)})` : ''}</p></div>
+                  <div className="bg-blue-500/10 rounded-xl p-4 mb-6 border border-blue-400/30"><p className="text-blue-200 text-sm"><strong className="text-white">✓ Receipt extracted</strong><br />{ocrItems.length} items = ${computedTotal.toFixed(2)}{ocrReceiptGrandTotal !== null ? ` (receipt total: $${ocrReceiptGrandTotal.toFixed(2)})` : ''}</p></div>
                 )}
                 {totalMismatch && (
                   <div className="bg-amber-500/10 rounded-xl p-4 mb-6 border border-amber-400/30">
@@ -701,71 +784,126 @@ export default function GroupPayPrototype() {
                   ))}
                 </div>
                 <button onClick={addItem} className="w-full mb-4 py-2.5 rounded-xl border-2 border-dashed border-white/20 text-white/50 hover:text-white hover:border-white/40 text-sm font-semibold transition-all">+ Add Item</button>
-                <div className={`mb-4 rounded-xl p-4 border ${(ocrCharges.length > 0 || ocrInformationalCharges.length > 0) ? 'bg-white/5 border-white/10' : 'bg-white/5 border-white/10'}`}>
-                  <div className="text-white/40 text-xs font-semibold uppercase tracking-wider mb-3">Receipt Charges</div>
-                  {ocrCharges.length > 0 && (
-                    <>
-                      <div className="text-amber-300/70 text-[11px] font-semibold uppercase tracking-wider mb-2">Added on top</div>
-                      {ocrCharges.map((charge, index) => (
-                        <div key={`charge-${index}`} className="flex items-center gap-2 mb-2">
-                          <input type="text" value={charge.name} onChange={(e) => updateCharge(index, 'name', e.target.value)} className="flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/60" />
-                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => updateCharge(index, 'price', e.target.value)} className="w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-amber-400" />
-                          <button onClick={() => removeCharge(index)} className="text-red-400/60 hover:text-red-400 p-1"><X size={18} /></button>
-                        </div>
-                      ))}
-                      <div className="text-xs mt-1 text-amber-300/70">
-                        ${computedCharges.toFixed(2)} will be added on top and split proportionally
-                      </div>
-                    </>
-                  )}
-                  {ocrInformationalCharges.length > 0 && (
-                    <>
-                      <div className={`text-white/30 text-[11px] font-semibold uppercase tracking-wider ${ocrCharges.length > 0 ? 'mt-4 mb-2' : 'mb-2'}`}>Already included</div>
-                      {ocrInformationalCharges.map((charge, index) => (
-                        <div key={`info-charge-edit-${index}`} className="flex items-center gap-2 mb-2">
-                          <input type="text" value={charge.name} onChange={(e) => {
-                            const value = e.target.value;
-                            setOcrInformationalCharges(prev => prev.map((c, i) => i === index ? { ...c, name: value } : c));
-                          }} className="flex-1 bg-white/10 text-sm rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/30" />
-                          <input type="number" step="0.01" value={charge.price || ''} onChange={(e) => {
-                            const value = Number(e.target.value);
-                            setOcrInformationalCharges(prev => prev.map((c, i) => i === index ? { ...c, price: Number.isFinite(value) ? value : 0 } : c));
-                          }} className="w-24 bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-white/30 line-through" />
-                          <button onClick={() => setOcrInformationalCharges(prev => prev.filter((_, i) => i !== index))} className="text-red-400/60 hover:text-red-400 p-1"><X size={18} /></button>
-                        </div>
-                      ))}
-                      <div className="text-xs mt-1 text-white/30">
-                        Shown for reference only. These do not get added into the split total.
-                      </div>
-                    </>
-                  )}
-                  <div className={`flex gap-2 ${(ocrCharges.length > 0 || ocrInformationalCharges.length > 0) ? 'mt-3' : 'mt-0'}`}>
-                    <button onClick={() => addCharge('9% GST', +(computedSubtotal * 0.09).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 9% GST</button>
-                    <button onClick={() => addCharge('10% Svc Charge', +(computedSubtotal * 0.10).toFixed(2), false)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/15 text-white/50 hover:text-white hover:border-white/30 transition-all">+ 10% Svc</button>
+
+                {/* Discount (applied before service charge & GST) */}
+                <div className="mb-4 rounded-xl p-4 border bg-white/5 border-white/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-white/60 text-sm font-semibold">Discount</span>
+                    <div className="flex gap-1">
+                      <button onClick={() => setOcrDiscountIsPercent(false)} className={`px-2 py-1 rounded text-xs font-semibold ${!ocrDiscountIsPercent ? 'bg-blue-500 text-white' : 'bg-white/5 text-white/40'}`}>$</button>
+                      <button onClick={() => setOcrDiscountIsPercent(true)} className={`px-2 py-1 rounded text-xs font-semibold ${ocrDiscountIsPercent ? 'bg-blue-500 text-white' : 'bg-white/5 text-white/40'}`}>%</button>
+                    </div>
+                  </div>
+                  <input type="number" step="0.01" min="0" value={ocrDiscount || ''} onChange={(e) => setOcrDiscount(Math.max(0, Number(e.target.value) || 0))} placeholder={ocrDiscountIsPercent ? '0 %' : '$0.00'} className="w-full bg-white/10 text-sm mono rounded-lg px-3 py-2 border border-white/10 focus:border-blue-400/50 focus:outline-none text-rose-300" />
+                  {itemizedDiscount > 0 && <div className="text-rose-300/70 text-xs mt-1">−${itemizedDiscount.toFixed(2)} off subtotal (before charges)</div>}
+                </div>
+
+                {/* Service charge & GST as rates */}
+                <div className="mb-4 rounded-xl p-4 border bg-white/5 border-white/10 space-y-3">
+                  <div className="text-white/40 text-xs font-semibold uppercase tracking-wider">Charges</div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-white/60 text-sm">Service charge</span>
+                      {ocrServiceOn && <input type="number" step="0.1" min="0" value={ocrServiceRate || ''} onChange={(e) => setOcrServiceRate(Math.max(0, Number(e.target.value) || 0))} className="w-14 bg-white/10 text-xs mono rounded px-2 py-1 border border-white/10 focus:border-blue-400/50 focus:outline-none text-amber-300" />}
+                      {ocrServiceOn && <span className="text-white/40 text-xs">%</span>}
+                    </div>
+                    <button onClick={() => setOcrServiceOn(!ocrServiceOn)} className={`w-9 h-5 rounded-full transition-all relative ${ocrServiceOn ? 'bg-blue-500' : 'bg-white/20'}`}>
+                      <div className={`w-4 h-4 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${ocrServiceOn ? 'left-[18px]' : 'left-0.5'}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-white/60 text-sm">GST</span>
+                      {ocrGstOn && <input type="number" step="0.1" min="0" value={ocrGstRate || ''} onChange={(e) => setOcrGstRate(Math.max(0, Number(e.target.value) || 0))} className="w-14 bg-white/10 text-xs mono rounded px-2 py-1 border border-white/10 focus:border-blue-400/50 focus:outline-none text-amber-300" />}
+                      {ocrGstOn && <span className="text-white/40 text-xs">%</span>}
+                    </div>
+                    <button onClick={() => setOcrGstOn(!ocrGstOn)} className={`w-9 h-5 rounded-full transition-all relative ${ocrGstOn ? 'bg-blue-500' : 'bg-white/20'}`}>
+                      <div className={`w-4 h-4 rounded-full bg-white shadow-md absolute top-0.5 transition-all ${ocrGstOn ? 'left-[18px]' : 'left-0.5'}`} />
+                    </button>
                   </div>
                 </div>
-                <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10">
-                  <div className="flex justify-between items-center"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
-                  {computedCharges > 0 && <div className="text-white/40 text-xs mono mt-1 text-right">${computedSubtotal.toFixed(2)} + ${computedCharges.toFixed(2)} charges</div>}
-                  {ocrReceiptGrandTotal !== null && <div className="text-white/30 text-xs mono mt-1 text-right">Receipt total: ${ocrReceiptGrandTotal.toFixed(2)}</div>}
+
+                {/* Ordered breakdown */}
+                <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10 space-y-1">
+                  <div className="flex justify-between text-sm"><span className="text-white/50">Subtotal</span><span className="text-white/80 mono">${itemizedSubtotal.toFixed(2)}</span></div>
+                  {itemizedDiscount > 0 && <div className="flex justify-between text-sm"><span className="text-rose-300/70">Discount</span><span className="text-rose-300 mono">−${itemizedDiscount.toFixed(2)}</span></div>}
+                  {ocrServiceOn && <div className="flex justify-between text-sm"><span className="text-white/50">Service {ocrServiceRate}%</span><span className="text-amber-300 mono">+${itemizedSvc.toFixed(2)}</span></div>}
+                  {ocrGstOn && <div className="flex justify-between text-sm"><span className="text-white/50">GST {ocrGstRate}%</span><span className="text-amber-300 mono">+${itemizedGst.toFixed(2)}</span></div>}
+                  {itemizedFlatCharges > 0 && <div className="flex justify-between text-sm"><span className="text-white/50">Other charges</span><span className="text-amber-300 mono">+${itemizedFlatCharges.toFixed(2)}</span></div>}
+                  <div className="flex justify-between items-center pt-2 mt-1 border-t border-white/15"><span className="text-white font-bold">TOTAL</span><span className="text-green-400 text-xl mono font-bold">${computedTotal.toFixed(2)}</span></div>
+                  {ocrReceiptGrandTotal !== null && <div className="text-white/30 text-xs mono text-right">Receipt total: ${ocrReceiptGrandTotal.toFixed(2)}</div>}
                 </div>
               </>
             )}
 
-            <button onClick={() => {
-              setOcrSubtotal(computedSubtotal);
-              setBillAmount(computedTotal.toFixed(2));
-              setStep('who-paid');
-            }} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between">
-              <span>Continue</span><ArrowRight size={20} />
-            </button>
-            <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
+            {(() => {
+              const namedItems = ocrItems.filter(i => i.name.trim() && i.price > 0);
+              const canContinue = namedItems.length > 0;
+              return (
+                <button
+                  disabled={!canContinue}
+                  onClick={() => {
+                    // Drop blank rows before continuing (manual entry may leave empties)
+                    setOcrItems(namedItems);
+                    setOcrSubtotal(computedSubtotal);
+                    setBillAmount(computedTotal.toFixed(2));
+                    setStep('who-paid');
+                  }}
+                  className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span>{canContinue ? 'Continue' : 'Add at least one item'}</span><ArrowRight size={20} />
+                </button>
+              );
+            })()}
+            {isManualItems ? (
+              <button onClick={() => { setIsManualItems(false); setManualMode('choice'); setStep('manual-bill'); }} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Back</button>
+            ) : (
+              <button onClick={() => setStep('ocr-scan')} className="w-full mt-3 btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Rescan Receipt</button>
+            )}
           </div>
           );
         })()}
 
         {/* Manual Bill */}
-        {step === 'manual-bill' && (
+        {step === 'manual-bill' && manualMode === 'choice' && (
+          <div className="glass rounded-3xl p-8 animate-in">
+            <h2 className="text-white text-xl font-bold mb-6">How do you want to enter it?</h2>
+            <div className="space-y-3">
+              <button
+                onClick={() => setManualMode('total')}
+                className="w-full btn-secondary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3"><DollarSign size={20} /><div className="text-left"><div>Total amount only</div><div className="text-white/40 text-xs font-normal">Just enter the final bill total</div></div></div>
+                <ArrowRight size={20} />
+              </button>
+              <button
+                onClick={() => {
+                  // Seed the itemized editor and reuse the same flow as a receipt scan
+                  setOcrItems([{ name: '', price: 0, qty: 1 }]);
+                  setOcrCharges([]);
+                  setOcrInformationalCharges([]);
+                  setOcrChargesIncluded(false);
+                  setOcrReceiptGrandTotal(null);
+                  setOcrServiceOn(false);
+                  setOcrGstOn(false);
+                  setOcrDiscount(0);
+                  setOcrDiscountIsPercent(false);
+                  setItemAssignments({});
+                  setOcrEditing(true);
+                  setIsManualItems(true);
+                  setStep('ocr-result');
+                }}
+                className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3"><Edit2 size={20} /><div className="text-left"><div>Itemize the bill</div><div className="text-white/60 text-xs font-normal">Add items, discounts, GST & svc, then assign</div></div></div>
+                <ArrowRight size={20} />
+              </button>
+            </div>
+            <button onClick={() => setStep('ocr-choice')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+          </div>
+        )}
+
+        {step === 'manual-bill' && manualMode === 'total' && (
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Enter Bill Amount</h2>
             <p className="text-blue-200 text-sm mb-5">Enter the total amount on your bill</p>
@@ -781,7 +919,7 @@ export default function GroupPayPrototype() {
             <button onClick={() => setStep('who-paid')} disabled={!billAmount || parseFloat(billAmount) <= 0} className="w-full btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center justify-between disabled:opacity-50 disabled:cursor-not-allowed">
               <span>Continue</span><ArrowRight size={20} />
             </button>
-            <button onClick={() => setStep('ocr-choice')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
+            <button onClick={() => setManualMode('choice')} className="w-full mt-4 text-blue-200 hover:text-white text-sm py-2 flex items-center justify-center gap-2"><ArrowLeft size={16} />Back</button>
           </div>
         )}
 
@@ -1047,7 +1185,6 @@ export default function GroupPayPrototype() {
         {/* Item Assignment (receipt scan only) */}
         {step === 'item-assign' && (() => {
           const allPeople = [currentUser, ...otherParticipants];
-          const totalCharges = ocrCharges.reduce((s, c) => s + c.price, 0);
           const expandedOcrItems = ocrItems.flatMap((item) => {
             const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
             return Array.from({ length: qty }, (_, unitIdx) => ({
@@ -1058,7 +1195,7 @@ export default function GroupPayPrototype() {
           const assignedCount = expandedOcrItems.filter((_, idx) => (itemAssignments[idx] || []).length > 0).length;
           const allAssigned = expandedOcrItems.length > 0 && assignedCount === expandedOcrItems.length;
 
-          // Calculate per-person totals
+          // Calculate per-person food totals (shared items split evenly)
           const personFoodTotals: Record<string, number> = {};
           allPeople.forEach(p => { personFoodTotals[p] = 0; });
           expandedOcrItems.forEach((item, idx) => {
@@ -1070,11 +1207,22 @@ export default function GroupPayPrototype() {
             });
           });
 
+          // Apply the ordered charge model: (food − discount) × svc × gst + flat.
+          // Rounding rule: round every NON-payee's share UP to the cent so the
+          // payee (who fronted the whole bill) always recovers at least the full
+          // amount — never a cent short, occasionally a few cents over. The payee's
+          // own displayed share is the remainder (bill − sum of others), which is
+          // ≤ their true share by exactly the rounding surplus.
+          const ceil2 = (n: number) => Math.ceil((n - Number.EPSILON) * 100) / 100;
           const personFinalTotals: Record<string, number> = {};
-          allPeople.forEach(name => {
-            const ratio = ocrSubtotal > 0 ? personFoodTotals[name] / ocrSubtotal : 0;
-            personFinalTotals[name] = personFoodTotals[name] + ratio * totalCharges;
+          let othersSum = 0;
+          otherParticipants.forEach(name => {
+            const amt = ceil2(personItemizedRaw(personFoodTotals[name]));
+            personFinalTotals[name] = amt;
+            othersSum += amt;
           });
+          // Payee covers whatever the others' rounded shares don't.
+          personFinalTotals[currentUser] = round2(itemizedTotal - othersSum);
 
           const toggleAssignment = (itemIdx: number, person: string) => {
             setItemAssignments(prev => {
@@ -1640,7 +1788,7 @@ export default function GroupPayPrototype() {
                 <span>Send to Group</span>
                 <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
               </button>
-              <button onClick={() => setStep(evenSplit ? 'split-type' : 'custom-split')} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
+              <button onClick={() => setStep(ocrItems.length > 0 ? 'item-assign' : evenSplit ? 'split-type' : 'custom-split')} className="w-full btn-secondary text-white px-6 py-3 rounded-xl font-semibold">Edit Split</button>
             </div>
           </div>
         )}
@@ -1793,6 +1941,11 @@ export default function GroupPayPrototype() {
               <button onClick={() => setOverviewTab('history')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'history' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
                 History
               </button>
+              {splitItems && splitItems.length > 0 && (
+                <button onClick={() => setOverviewTab('items')} className={`flex-1 rounded-lg py-2 text-xs font-semibold transition-all ${overviewTab === 'items' ? 'bg-blue-500 text-white shadow-lg' : 'text-white/50 hover:text-white'}`}>
+                  Items
+                </button>
+              )}
             </div>
 
             {overviewTab === 'status' && (
@@ -1916,6 +2069,37 @@ export default function GroupPayPrototype() {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {overviewTab === 'items' && splitItems && (
+              <div className="mb-4 space-y-3">
+                <p className="text-blue-200 text-xs">Itemized breakdown — cross-check your assigned items below.</p>
+                {splitItems.map((item, i) => (
+                  <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
+                    <div className="flex justify-between items-start mb-1">
+                      <span className="text-white text-sm font-medium">{item.name}</span>
+                      <span className="text-green-400 mono text-sm font-semibold">${item.price.toFixed(2)}</span>
+                    </div>
+                    {item.assignees.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {item.assignees.map((a, j) => (
+                          <span key={j} className="text-[10px] bg-blue-500/15 text-blue-200 rounded px-2 py-0.5 mono">
+                            @{a}{item.assignees.length > 1 ? ` · $${(item.price / item.assignees.length).toFixed(2)}` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-amber-400">Unassigned</span>
+                    )}
+                  </div>
+                ))}
+                <div className="bg-white/5 rounded-lg p-3 mt-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-white/50">Items Subtotal</span>
+                    <span className="text-white mono font-bold">${splitItems.reduce((s, it) => s + it.price, 0).toFixed(2)}</span>
+                  </div>
+                </div>
               </div>
             )}
 

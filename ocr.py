@@ -81,6 +81,12 @@ _TAX_SERVICE_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# Discount / promo / voucher lines — these REDUCE the bill (applied before svc/GST)
+_DISCOUNT_PATTERNS = re.compile(
+    r'\b(discount|promo(tion)?|voucher|rebate|less\b|off\b|deduct|coupon|member\s*price|savings?)',
+    re.IGNORECASE
+)
+
 # Singapore dollar price: S$9.90, $9.90, or just 9.90
 _SG_PRICE_RE = re.compile(r'S?\$?\s*(\d+\.\d{2})\b')
 
@@ -164,8 +170,20 @@ def _normalize_gemini_result(result):
     receipt_subtotal = _to_money(result.get("receipt_subtotal"))
     receipt_grand_total = _to_money(result.get("receipt_grand_total"))
 
+    discounts = _normalize_model_charges(result.get("discounts", []))
+
+    def _rate(value):
+        v = _to_money(value)
+        return v if v and v > 0 else None
+
+    service_charge_rate = _rate(result.get("service_charge_rate"))
+    gst_rate = _rate(result.get("gst_rate"))
+
     return {
         "items": items,
+        "discounts": discounts,
+        "service_charge_rate": service_charge_rate,
+        "gst_rate": gst_rate,
         "add_on_charges": add_on_charges,
         "informational_charges": informational_charges,
         "charges": add_on_charges + informational_charges,
@@ -386,13 +404,15 @@ def parse_receipt_lines(lines):
                 print(f"  -> SKIP (name too short after cleanup)")
             continue
 
+        # Tag discount lines first (they look like charges but reduce the bill)
+        is_discount = bool(_DISCOUNT_PATTERNS.search(name))
         # Tag tax/service charge lines
-        is_charge = bool(_TAX_SERVICE_PATTERNS.search(name))
-        if is_charge:
+        is_charge = (not is_discount) and bool(_TAX_SERVICE_PATTERNS.search(name))
+        if is_charge or is_discount:
             qty = 1
 
-        print(f"  -> KEEP: name={name!r}, price={price}, qty={qty}, charge={is_charge}")
-        items.append({'name': name, 'price': price, 'qty': qty, 'is_charge': is_charge})
+        print(f"  -> KEEP: name={name!r}, price={price}, qty={qty}, charge={is_charge}, discount={is_discount}")
+        items.append({'name': name, 'price': price, 'qty': qty, 'is_charge': is_charge, 'is_discount': is_discount})
 
     print(f"[OCR] Final items: {items}")
     return items
@@ -431,17 +451,24 @@ def _gemini_ocr(image_bytes):
                     "Extract the bill structure from this receipt image. "
                     "Return ONLY valid JSON with this exact structure, no markdown:\n"
                     '{"items": [{"name": "Item Name", "price": 9.90, "qty": 1}], '
+                    '"discounts": [{"name": "Member Discount", "price": 2.00}], '
+                    '"service_charge_rate": 10, '
+                    '"gst_rate": 9, '
                     '"add_on_charges": [{"name": "Service Charge 10%", "price": 1.50}], '
                     '"informational_charges": [{"name": "GST 9% (included)", "price": 0.99}], '
                     '"receipt_subtotal": 18.00, '
                     '"receipt_grand_total": 19.50}\n\n'
                     "Rules:\n"
                     "- items: individual food/drink items with name, unit price, quantity\n"
+                    "- discounts: any discount/promo/voucher/rebate lines that REDUCE the bill. Report price as a POSITIVE number (the amount taken off). These are applied to the subtotal BEFORE service charge and GST.\n"
+                    "- service_charge_rate: the service charge percentage as a number (e.g. 10 for 10%) if shown; otherwise null\n"
+                    "- gst_rate: the GST/tax percentage as a number (e.g. 9 for 9%) if shown; otherwise null\n"
                     "- add_on_charges: GST/service charge lines that are actually added on top of menu prices and contribute to the amount payable\n"
                     "- informational_charges: tax/service lines shown only for breakdown/info and already included in the payable amount; common clues are 'included', parentheses, or grand total not increasing by that amount\n"
                     "- receipt_subtotal: copy the subtotal before add-on charges if it is explicitly visible; otherwise null\n"
                     "- receipt_grand_total: copy the final amount payable exactly as shown on the receipt; do NOT invent or recompute it; if not visible, return null\n"
                     "- Never use informational_charges to build a new total\n"
+                    "- A discount line is NOT an item — never put it in the items array\n"
                     "- If a receipt shows both informational GST and add-on service charge, keep them in separate arrays\n"
                     "- Skip sub-items that are part of a set meal (e.g. rice, salad that come with a set)\n"
                     "- Skip headers, footers, payment method lines\n"
@@ -516,9 +543,11 @@ def run_ocr(image_bytes):
                 food_count = rotated_food
 
     food_items = [{'name': i['name'], 'price': i['price'], 'qty': i['qty']}
-                  for i in all_items if not i['is_charge']]
+                  for i in all_items if not i['is_charge'] and not i.get('is_discount')]
     charges = [{'name': i['name'], 'price': i['price']}
                for i in all_items if i['is_charge']]
+    discounts = [{'name': i['name'], 'price': i['price']}
+                 for i in all_items if i.get('is_discount')]
 
     # Detect if charges are already included in menu prices.
     grand_total = _extract_grand_total(all_lines)
@@ -537,6 +566,9 @@ def run_ocr(image_bytes):
 
     return {
         'items': food_items,
+        'discounts': discounts,
+        'service_charge_rate': None,
+        'gst_rate': None,
         'add_on_charges': [] if charges_included else charges,
         'informational_charges': charges if charges_included else [],
         'charges': charges,

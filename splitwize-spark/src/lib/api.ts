@@ -7,6 +7,13 @@ export interface Participant {
   screenshot_path?: string;
 }
 
+export interface SplitItem {
+  name: string;
+  price: number;
+  qty: number;
+  assignees: string[];
+}
+
 export interface Session {
   id: string;
   event_name: string;
@@ -15,6 +22,7 @@ export interface Session {
   even_split: boolean;
   created_at: string;
   participants: Participant[];
+  items?: SplitItem[] | null;
 }
 
 export async function createSession(data: {
@@ -28,6 +36,7 @@ export async function createSession(data: {
   participants: { name: string; amount: string; telegram_id?: string }[];
   chat_id?: string;
   thread_id?: string;
+  items?: { name: string; price: number; qty: number; assignees: string[] }[];
 }): Promise<Session> {
   const res = await fetch(`${API_BASE}/sessions`, {
     method: 'POST',
@@ -101,6 +110,9 @@ export async function scanReceipt(file: File): Promise<{
   items?: { name: string; price: number; qty: number }[];
   add_on_charges?: { name: string; price: number }[];
   informational_charges?: { name: string; price: number }[];
+  discounts?: { name: string; price: number }[];
+  service_charge_rate?: number | null;
+  gst_rate?: number | null;
   charges?: { name: string; price: number }[];
   charges_included?: boolean;
   subtotal?: number;

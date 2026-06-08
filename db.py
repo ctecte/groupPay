@@ -53,7 +53,7 @@ def init_db():
     """)
     conn.commit()
     # Migrate: add columns if missing (for existing DBs)
-    for col, coltype in [("payee_telegram_id", "TEXT"), ("poll_id", "TEXT"), ("poll_msg_id", "TEXT"), ("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT")]:
+    for col, coltype in [("payee_telegram_id", "TEXT"), ("poll_id", "TEXT"), ("poll_msg_id", "TEXT"), ("remind_after_hours", "REAL"), ("remind_at", "TEXT"), ("last_reminded_at", "TEXT"), ("items_json", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
             conn.commit()
@@ -74,13 +74,14 @@ def create_session(event_name: str, bill_amount: str, payee: str,
                    thread_id: str | None = None,
                    payee_phone: str | None = None,
                    payee_amount: str | None = None,
-                   payee_telegram_id: str | None = None) -> dict:
+                   payee_telegram_id: str | None = None,
+                   items_json: str | None = None) -> dict:
     session_id = uuid.uuid4().hex[:12]
     now = datetime.utcnow().isoformat()
     conn = _connect()
     conn.execute(
-        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, even_split, chat_id, thread_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (session_id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, int(even_split), chat_id, thread_id, now),
+        "INSERT INTO sessions (id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, even_split, chat_id, thread_id, created_at, items_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (session_id, event_name, bill_amount, payee, payee_telegram_id, payee_phone, payee_amount, int(even_split), chat_id, thread_id, now, items_json),
     )
     for p in participants:
         payment_ref = f"GP-{uuid.uuid4().hex[:4].upper()}"
