@@ -856,8 +856,54 @@ def cmd_help(msg):
         print(f"[CMD_HELP ERROR] chat_id={msg.chat.id}: {e}", flush=True)
 
 
+def _send_welcome(chat_id: int, thread_kwargs: dict | None = None):
+    """Greet a group when GroupPay is added. Sent without a web_app keyboard
+    because my_chat_member has no message context for thread/button building."""
+    try:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton(
+            "💰 Open GroupPay",
+            web_app=types.WebAppInfo(url=_build_webapp_url(chat_id)),
+        ) if chat_id > 0 else types.InlineKeyboardButton(
+            "💰 Open GroupPay", url=_build_webapp_url(chat_id),
+        ))
+        bot.send_message(
+            chat_id,
+            "👋 *Thanks for adding GroupPay!*\n\n"
+            "Heads up: I can only see the @telehandles of people who are "
+            "added or send a message in this chat *after* I joined — so say hi!\n\n"
+            "Say hello to easy bill splits with PayNow QRs at your fingertips. "
+            "Tap below or use /split to get started.",
+            parse_mode="Markdown",
+            reply_markup=kb,
+            **(thread_kwargs or {}),
+        )
+    except Exception as e:
+        print(f"[WELCOME ERROR] chat_id={chat_id}: {e}", flush=True)
+
+
+@bot.my_chat_member_handler()
+def handle_my_chat_member(update):
+    """Fires when the bot's own membership changes — including being added during
+    group creation (which does NOT emit new_chat_members). Greet on join."""
+    try:
+        new_status = update.new_chat_member.status
+        old_status = update.old_chat_member.status if update.old_chat_member else None
+        chat = update.chat
+        # Transition into a group as member/admin = freshly added.
+        if chat.type in ("group", "supergroup") and new_status in ("member", "administrator") \
+                and old_status in (None, "left", "kicked"):
+            print(f"[WELCOME] Bot added to {chat.type} {chat.id} (via my_chat_member)", flush=True)
+            _send_welcome(chat.id)
+    except Exception as e:
+        print(f"[MY_CHAT_MEMBER ERROR] {e}", flush=True)
+
+
 @bot.message_handler(content_types=["new_chat_members"])
 def handle_new_members(msg):
+    # Track newly-added members. Greeting is handled by my_chat_member (which
+    # fires for both group-creation and existing-group adds) to avoid a double
+    # welcome when both events arrive.
     if msg.chat.type in ("group", "supergroup"):
         chat_id = msg.chat.id
         if chat_id not in group_members:
@@ -866,24 +912,6 @@ def handle_new_members(msg):
             name = user.first_name or user.username or str(user.id)
             group_members[chat_id][user.id] = name
         _save_members()
-
-        # Greet the group when GroupPay itself is the one being added.
-        bot_id = int(BOT_TOKEN.split(":")[0])
-        if any(u.id == bot_id for u in msg.new_chat_members):
-            try:
-                bot.send_message(
-                    chat_id,
-                    "👋 *Thanks for adding GroupPay!*\n\n"
-                    "Heads up: I can only see the @telehandles of people who are "
-                    "added or send a message in this chat *after* I joined — so say hi!\n\n"
-                    "Say hello to easy bill splits with PayNow QRs at your fingertips. "
-                    "Tap below or use /split to get started.",
-                    parse_mode="Markdown",
-                    reply_markup=_make_keyboard(msg),
-                    **_thread_kwargs(msg),
-                )
-            except Exception as e:
-                print(f"[WELCOME ERROR] chat_id={chat_id}: {e}", flush=True)
 
 
 @bot.message_handler(content_types=["left_chat_member"])
@@ -996,7 +1024,14 @@ def _setup_webhook():
         try:
             bot.remove_webhook()
             time.sleep(0.5)
-            bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            # allowed_updates must be set explicitly to receive my_chat_member —
+            # it's NOT in Telegram's default set. Include the default message/
+            # callback types too, or they'd be dropped.
+            bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True,
+                allowed_updates=["message", "edited_message", "callback_query", "my_chat_member"],
+            )
             print(f"🔗 Webhook set: {webhook_url}")
             return
         except Exception as e:
