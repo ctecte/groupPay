@@ -786,7 +786,7 @@ def handle_resolve_payment(call):
     p_mention = _mention(target_name, participant.get("telegram_id"))
     try:
         bot.edit_message_text(
-            f"✅ {p_mention} — <b>${participant['amount']}</b> paid",
+            f"✅ {p_mention} — <b>${participant['amount']}</b> paid — manually marked by the collector",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             parse_mode="HTML",
