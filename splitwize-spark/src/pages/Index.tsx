@@ -788,7 +788,7 @@ export default function GroupPayPrototype() {
                 {/* Discount (applied before service charge & GST) */}
                 <div className="mb-4 rounded-xl p-4 border bg-white/5 border-white/10">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-white/60 text-sm font-semibold">Discount</span>
+                    <span className="text-white/60 text-sm font-semibold">Discount <span className="text-white/30 font-normal">(if any)</span></span>
                     <div className="flex gap-1">
                       <button onClick={() => setOcrDiscountIsPercent(false)} className={`px-2 py-1 rounded text-xs font-semibold ${!ocrDiscountIsPercent ? 'bg-blue-500 text-white' : 'bg-white/5 text-white/40'}`}>$</button>
                       <button onClick={() => setOcrDiscountIsPercent(true)} className={`px-2 py-1 rounded text-xs font-semibold ${ocrDiscountIsPercent ? 'bg-blue-500 text-white' : 'bg-white/5 text-white/40'}`}>%</button>
