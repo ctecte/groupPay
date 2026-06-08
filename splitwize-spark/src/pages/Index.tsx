@@ -2129,8 +2129,8 @@ export default function GroupPayPrototype() {
                   <p className="text-blue-200 text-sm mb-3">Nudge those who haven't paid after:</p>
                   <div className="grid grid-cols-3 gap-2 mb-4">
                     {[
-                      { label: '1 min', hours: 1/60 },
-                      { label: '5 min', hours: 5/60 },
+                      { label: '1 hour', hours: 1 },
+                      { label: '3 hours', hours: 3 },
                       { label: '6 hours', hours: 6 },
                       { label: '12 hours', hours: 12 },
                       { label: '1 day', hours: 24 },
