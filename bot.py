@@ -749,12 +749,13 @@ def handle_qr_whisper(call):
     # Mark whisper as read
     db.mark_whisper_read(session_id, target_name)
 
-    # Replace button with payment details + QR page link
+    # Replace button with payment details + QR page link + a payee-only resolve button.
     qr_page_url = f"{WEBAPP_URL}/api/sessions/{session_id}/pay/{quote(target_name)}"
     p_mention = _mention(target_name, target_tid)
     try:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("📲 Open PayNow QR", url=qr_page_url))
+        kb.add(types.InlineKeyboardButton("✅ Mark paid (collector)", callback_data=f"resolve|{session_id}|{target_name}"))
         payee_mention = _mention(session["payee"], chat_id=call.message.chat.id)
         bot.edit_message_text(
             f"💸 {p_mention} owes <b>${participant['amount']}</b>\n"
@@ -764,6 +765,61 @@ def handle_qr_whisper(call):
             message_id=call.message.message_id,
             parse_mode="HTML",
             reply_markup=kb,
+        )
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("resolve|"))
+def handle_resolve_payment(call):
+    """Payee taps to mark a participant as paid, right in the group chat."""
+    parts = call.data.split("|", 2)  # resolve|session_id|name
+    if len(parts) < 3:
+        bot.answer_callback_query(call.id, "Invalid data.", show_alert=True)
+        return
+    _, session_id, target_name = parts
+
+    session = db.get_session(session_id)
+    if not session:
+        bot.answer_callback_query(call.id, "Session expired.", show_alert=True)
+        return
+
+    # Only the payee (the person collecting) may resolve payments.
+    payee_tid = session.get("payee_telegram_id")
+    clicker = call.from_user
+    is_payee = (
+        (payee_tid and str(clicker.id) == str(payee_tid))
+        or (clicker.username or "").lower() == str(session["payee"]).lower()
+        or (clicker.first_name or "").lower() == str(session["payee"]).lower()
+    )
+    if not is_payee:
+        bot.answer_callback_query(
+            call.id,
+            f"🚫 Only {session['payee']} (the collector) can mark payments.",
+            show_alert=True,
+        )
+        return
+
+    participant = next((p for p in session["participants"] if p["name"] == target_name), None)
+    if not participant:
+        bot.answer_callback_query(call.id, "Participant not found.", show_alert=True)
+        return
+
+    if participant["status"] == "paid":
+        bot.answer_callback_query(call.id, f"{target_name} is already marked paid.")
+        return
+
+    db.update_participant_status(session_id, target_name, "paid")
+    bot.answer_callback_query(call.id, f"✅ Marked {target_name} as paid.")
+
+    # Reflect the resolved state in the message (drop the buttons).
+    p_mention = _mention(target_name, participant.get("telegram_id"))
+    try:
+        bot.edit_message_text(
+            f"✅ {p_mention} — <b>${participant['amount']}</b> paid",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="HTML",
         )
     except Exception:
         pass
