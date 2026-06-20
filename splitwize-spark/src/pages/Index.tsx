@@ -874,8 +874,9 @@ export default function GroupPayPrototype() {
           <div className="glass rounded-3xl p-8 animate-in">
             <h2 className="text-white text-xl font-bold mb-2">Scan Your Receipt</h2>
             <p className="text-blue-200 text-sm mb-6">Upload a clear image of your receipt, and try again if the scan is incorrect</p>
-            {/* capture="environment" opens the rear camera directly in the TMA webview */}
-            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+            {/* bare `capture` opens the camera; some Android WebViews ignore the
+                string form `capture="environment"` and fall back to the file picker */}
+            <input ref={cameraInputRef} type="file" accept="image/*" capture onChange={handleFileSelect} className="hidden" />
             <input ref={galleryInputRef} type="file" accept="image/*" onChange={handleFileSelect} className="hidden" />
             <div className="relative bg-black/40 rounded-2xl p-4 mb-6 aspect-[3/4] flex items-center justify-center border-2 border-dashed border-blue-400/50">
               {!ocrScanning ? (
